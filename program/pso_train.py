@@ -1,4 +1,4 @@
-"""PSO-driven gating optimisation over trained CIFAR-100 sub experts."""
+"""PSO-driven gating optimisation over trained CIFAR sub experts (CIFAR-100 / CIFAR-10)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 import tensorflow as tf
-from keras.datasets import cifar100
+from keras.datasets import cifar100, cifar10
 from tensorflow import keras
 
 from . import config
@@ -83,7 +83,14 @@ def normalize_images(images: np.ndarray, mean: tuple[float, float, float], std: 
     return (images - mean_arr) / std_arr
 
 
-def load_expert_models(expert_root: Path, num_experts: int, learning_rate: float) -> list[keras.Model]:
+def load_expert_models(
+    expert_root: Path,
+    num_experts: int,
+    learning_rate: float,
+    *,
+    img_shape: tuple[int, int, int],
+    num_classes: int,
+) -> list[keras.Model]:
     models = []
     for expert_id in range(num_experts):
         expert_dir = expert_root / f"expert_{expert_id:02d}"
@@ -95,6 +102,8 @@ def load_expert_models(expert_root: Path, num_experts: int, learning_rate: float
             smoothing=0.0,
             learning_rate=learning_rate,
             noise_std=0.0,
+            img_shape=img_shape,
+            num_classes=num_classes,
         )
         model.load_weights(weights_path)
         models.append(model)
@@ -132,6 +141,8 @@ class ParticleSwarmOptimizer:
         social: float,
         iterations: int,
         rng: np.random.Generator,
+        v_max: float | None = None,
+        early_stop_patience: int | None = None,
     ) -> None:
         self.weight_adapter = weight_adapter
         self.dimension = weight_adapter.dimension
@@ -151,10 +162,14 @@ class ParticleSwarmOptimizer:
         self.global_best_position = self.positions[0].copy()
         self.global_best_score = -np.inf
         self.history: list[dict[str, float]] = []
+        self.v_max = v_max if v_max and v_max > 0 else None
+        self.early_stop_patience = max(0, early_stop_patience or 0)
+        self._no_improve = 0
 
     def optimize(self) -> tuple[np.ndarray, list[dict[str, float]]]:
         for iteration in range(self.iterations):
             inertia = self._interpolate_inertia(iteration)
+            prev_best = self.global_best_score
             for idx in range(self.num_particles):
                 position = self.positions[idx]
                 result = self.evaluate_fn(position)
@@ -172,6 +187,8 @@ class ParticleSwarmOptimizer:
                 cognitive_term = self.cognitive * r1 * (self.personal_best_positions[idx] - position)
                 social_term = self.social * r2 * (self.global_best_position - position)
                 self.velocities[idx] = inertia * self.velocities[idx] + cognitive_term + social_term
+                if self.v_max is not None and self.v_max > 0:
+                    np.clip(self.velocities[idx], -self.v_max, self.v_max, out=self.velocities[idx])
                 self.positions[idx] = position + self.velocities[idx]
 
             # snapshot average gating matrix for the current global best
@@ -190,6 +207,15 @@ class ParticleSwarmOptimizer:
                 "best_score": self.global_best_score,
                 "avg_gating": avg_gating,
             })
+
+            # early stopping check
+            improved = self.global_best_score > prev_best + 1e-12
+            if improved:
+                self._no_improve = 0
+            else:
+                self._no_improve += 1
+                if self.early_stop_patience and self._no_improve >= self.early_stop_patience:
+                    break
         return self.global_best_position, self.history
 
     def _interpolate_inertia(self, iteration: int) -> float:
@@ -320,6 +346,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("./models/pso_gating"))
     parser.add_argument("--iterations", type=int, default=config.PSO_DEFAULT_ITERATIONS)
     parser.add_argument("--particles", type=int, default=config.PSO_DEFAULT_PARTICLES)
+    parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100")
     return parser.parse_args(argv)
 
 
@@ -327,21 +354,37 @@ def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
     rng = np.random.default_rng(args.seed)
 
-    (x_train, y_train), (x_test, y_test) = cifar100.load_data(label_mode="fine")
+    if args.dataset == "cifar100":
+        (x_train, y_train), (x_test, y_test) = cifar100.load_data(label_mode="fine")
+        mean, std = config.CIFAR_CHANNEL_MEAN, config.CIFAR_CHANNEL_STD
+        img_shape = config.CIFAR_IMG_SHAPE
+        num_classes = config.CIFAR_NUM_CLASSES
+    else:  # cifar10
+        (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+        mean, std = config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
+        img_shape = config.CIFAR10_IMG_SHAPE
+        num_classes = config.CIFAR10_NUM_CLASSES
+
     images = np.concatenate([x_train, x_test], axis=0)
     labels = np.concatenate([y_train, y_test], axis=0).squeeze().astype(np.int32)
-    images = normalize_images(images, config.CIFAR_CHANNEL_MEAN, config.CIFAR_CHANNEL_STD)
+    images = normalize_images(images, mean, std)
 
     if args.sample_count and args.sample_count < images.shape[0]:
         indices = rng.choice(images.shape[0], size=args.sample_count, replace=False)
         images = images[indices]
         labels = labels[indices]
 
-    expert_models = load_expert_models(args.experts, args.num_experts, args.lr)
+    expert_models = load_expert_models(
+        args.experts,
+        args.num_experts,
+        args.lr,
+        img_shape=img_shape,
+        num_classes=num_classes,
+    )
     expert_logits = precompute_expert_logits(expert_models, images, batch_size=args.batch_size)
 
     eval_set = EvaluationSet(images, labels, expert_logits, batch_size=args.batch_size)
-    gating_model = build_gating_model(args.num_experts, args.hidden_units)
+    gating_model = build_gating_model(args.num_experts, args.hidden_units, img_shape=img_shape)
     weight_adapter = WeightAdapter(gating_model)
 
     evaluator = FitnessEvaluator(
@@ -366,6 +409,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         social=config.PSO_SOCIAL_COEFF,
         iterations=args.iterations,
         rng=rng,
+        v_max=config.PSO_VELOCITY_MAX,
+        early_stop_patience=config.PSO_EARLY_STOP_PATIENCE,
     )
 
     best_vector, history = optimizer.optimize()
@@ -375,6 +420,25 @@ def main(argv: Iterable[str] | None = None) -> None:
     np.save(args.output / "gating_weights.npy", best_vector)
     with open(args.output / "pso_history.json", "w", encoding="utf-8") as fp:
         json.dump(history, fp, indent=2)
+    # also write CSV & numpy history artifacts
+    try:
+        import csv
+        with open(args.output / "fitness.csv", "w", newline="", encoding="utf-8") as csvfp:
+            writer = csv.writer(csvfp)
+            writer.writerow(["iteration", "inertia", "best_score"])
+            for row in history:
+                writer.writerow([row.get("iteration"), row.get("inertia"), row.get("best_score")])
+    except Exception as e:  # pragma: no cover - best effort
+        print("Failed to write fitness.csv:", e)
+
+    try:
+        # extract avg gating matrices into ndarray (iterations, N, N)
+        matrices = [np.asarray(h["avg_gating"], dtype=np.float32) for h in history if h.get("avg_gating") is not None]
+        if matrices:
+            arr = np.stack(matrices, axis=0)
+            np.save(args.output / "C_history.npy", arr)
+    except Exception as e:  # pragma: no cover
+        print("Failed to write C_history.npy:", e)
     with open(args.output / "fitness.json", "w", encoding="utf-8") as fp:
         json.dump(
             {

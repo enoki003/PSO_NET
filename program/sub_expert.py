@@ -1,4 +1,8 @@
-"""Model architecture helpers for CIFAR-100 sub experts."""
+"""Model architecture helpers for CIFAR sub experts.
+
+デフォルトは CIFAR-100 前提だが、CIFAR-10 実験向けに `img_shape` と `num_classes` を
+パラメータ化している。既存呼び出し互換のためデフォルト引数は従来値。
+"""
 
 from __future__ import annotations
 
@@ -22,9 +26,27 @@ def build_sub_expert_model(
     smoothing: float,
     noise_std: float = 0.05,
     learning_rate: float = 1e-3,
+    img_shape: tuple[int, int, int] = config.CIFAR_IMG_SHAPE,
+    num_classes: int = config.CIFAR_NUM_CLASSES,
 ) -> keras.Model:
-    """Construct the CIFAR-100 specialist model used by training and PSO."""
-    inputs = layers.Input(shape=config.CIFAR_IMG_SHAPE)
+    """Construct a CIFAR specialist model.
+
+    Parameters
+    ----------
+    use_softmax : bool
+        出力層に softmax を付与するか（事前学習用） / False の場合 logits を返す。
+    smoothing : float
+        ラベルスムージング係数 (softmax 使用時のみ有効)。
+    noise_std : float
+        入力 GaussianNoise の標準偏差。PSO 評価時は 0 にする。
+    learning_rate : float
+        Adam の学習率。
+    img_shape : tuple[int,int,int]
+        入力画像形状。CIFAR-10/100 で (32,32,3)。
+    num_classes : int
+        クラス数。CIFAR-10=10, CIFAR-100=100。
+    """
+    inputs = layers.Input(shape=img_shape)
     x = layers.GaussianNoise(noise_std)(inputs)
 
     for filters in (64, 96, 128):
@@ -37,7 +59,7 @@ def build_sub_expert_model(
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dense(256, activation='relu')(x)
     x = layers.Dropout(0.3)(x)
-    logits = layers.Dense(config.CIFAR_NUM_CLASSES, name='logits')(x)
+    logits = layers.Dense(num_classes, name='logits')(x)
 
     if use_softmax:
         outputs = layers.Activation('softmax', name='softmax')(logits)

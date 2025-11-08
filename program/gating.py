@@ -1,4 +1,7 @@
-"""Utilities for constructing gating networks used in PSO and evaluation."""
+"""Utilities for constructing gating networks used in PSO and evaluation.
+
+`img_shape` をパラメータ化し CIFAR-10/100 両対応。既存呼び出しはデフォルト値を使用。
+"""
 
 from __future__ import annotations
 
@@ -7,8 +10,8 @@ from tensorflow import keras
 from . import config
 
 
-def build_gating_model(num_experts: int, hidden_units: int) -> keras.Model:
-    inputs = keras.Input(shape=config.CIFAR_IMG_SHAPE)
+def build_gating_model(num_experts: int, hidden_units: int, *, img_shape: tuple[int, int, int] = config.CIFAR_IMG_SHAPE) -> keras.Model:
+    inputs = keras.Input(shape=img_shape)
     x = keras.layers.Conv2D(48, 3, padding="same", activation="relu")(inputs)
     x = keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
     x = keras.layers.MaxPooling2D()(x)

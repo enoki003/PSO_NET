@@ -8,7 +8,7 @@ from typing import Iterable
 
 import numpy as np
 import tensorflow as tf
-from keras.datasets import cifar100
+from keras.datasets import cifar100, cifar10
 from keras.utils import to_categorical
 
 from . import config
@@ -20,7 +20,7 @@ AUTOTUNE = tf.data.AUTOTUNE
 
 @dataclass
 class TrainConfig:
-    """Configuration values for CIFAR-100 specialist training."""
+    """Configuration values for CIFAR specialist training (CIFAR-100 default)."""
 
     train_with_softmax: bool = True
     num_experts: int = 8
@@ -32,10 +32,11 @@ class TrainConfig:
     subset_seed: int = 42
     output_root: Path = Path("./models/cifar_sub_experts")
     noise_std: float = 0.05
+    dataset: str = "cifar100"
 
 
 def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Train CIFAR-100 sub experts.")
+    parser = argparse.ArgumentParser(description="Train CIFAR sub experts (CIFAR-100 / CIFAR-10).")
     parser.add_argument("--num-experts", type=int, default=8)
     parser.add_argument("--subset-pool-fraction", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=3)
@@ -46,6 +47,7 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
     parser.add_argument("--output-root", type=Path, default=Path("./models/cifar_sub_experts"))
     parser.add_argument("--noise-std", type=float, default=0.05)
     parser.add_argument("--no-softmax", dest="train_with_softmax", action="store_false")
+    parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100", help="Select dataset")
     parser.set_defaults(train_with_softmax=True)
     args = parser.parse_args(argv)
     return TrainConfig(
@@ -59,22 +61,23 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
         subset_seed=args.subset_seed,
         output_root=args.output_root,
         noise_std=args.noise_std,
+        dataset=args.dataset,
     )
 
 
-def normalize_images(images: np.ndarray) -> np.ndarray:
+def normalize_images(images: np.ndarray, mean: tuple[float, float, float], std: tuple[float, float, float]) -> np.ndarray:
     images = images.astype("float32") / 255.0
-    mean = np.asarray(config.CIFAR_CHANNEL_MEAN, dtype=np.float32)
-    std = np.asarray(config.CIFAR_CHANNEL_STD, dtype=np.float32)
+    mean = np.asarray(mean, dtype=np.float32)
+    std = np.asarray(std, dtype=np.float32)
     return (images - mean) / std
 
 
-def stratified_subsets(labels: np.ndarray, experts: int, pool_fraction: float, seed: int) -> list[np.ndarray]:
+def stratified_subsets(labels: np.ndarray, experts: int, pool_fraction: float, seed: int, num_classes: int) -> list[np.ndarray]:
     rng = np.random.default_rng(seed)
     labels = labels.squeeze().astype(np.int32)
     expert_indices = [[] for _ in range(experts)]
 
-    for cls in range(config.CIFAR_NUM_CLASSES):
+    for cls in range(num_classes):
         cls_indices = np.where(labels == cls)[0]
         if cls_indices.size == 0:
             continue
@@ -123,16 +126,26 @@ def build_dataset(
 def train(cfg: TrainConfig) -> None:
     tf.random.set_seed(cfg.subset_seed)
 
-    (x_train, y_train), (x_test, y_test) = cifar100.load_data(label_mode="fine")
-    x_train = normalize_images(x_train)
-    x_test = normalize_images(x_test)
+    if cfg.dataset == "cifar100":
+        (x_train, y_train), (x_test, y_test) = cifar100.load_data(label_mode="fine")
+        mean, std = config.CIFAR_CHANNEL_MEAN, config.CIFAR_CHANNEL_STD
+        num_classes = config.CIFAR_NUM_CLASSES
+        img_shape = config.CIFAR_IMG_SHAPE
+    else:  # cifar10
+        (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+        mean, std = config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
+        num_classes = config.CIFAR10_NUM_CLASSES
+        img_shape = config.CIFAR10_IMG_SHAPE
 
-    index_sets = stratified_subsets(y_train, cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed)
+    x_train = normalize_images(x_train, mean, std)
+    x_test = normalize_images(x_test, mean, std)
+
+    index_sets = stratified_subsets(y_train, cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed, num_classes)
 
     if cfg.train_with_softmax:
         # Keras 3: to_categorical no longer accepts dtype; cast explicitly
-        y_train_proc = to_categorical(y_train, num_classes=config.CIFAR_NUM_CLASSES).astype("float32")
-        y_test_proc = to_categorical(y_test, num_classes=config.CIFAR_NUM_CLASSES).astype("float32")
+        y_train_proc = to_categorical(y_train, num_classes=num_classes).astype("float32")
+        y_test_proc = to_categorical(y_test, num_classes=num_classes).astype("float32")
     else:
         y_train_proc = y_train.squeeze().astype("int32")
         y_test_proc = y_test.squeeze().astype("int32")
@@ -158,6 +171,8 @@ def train(cfg: TrainConfig) -> None:
         "learning_rate": cfg.learning_rate,
         "subset_seed": cfg.subset_seed,
         "noise_std": cfg.noise_std,
+    "dataset": cfg.dataset,
+        "num_classes": num_classes,
     }
     with open(cfg.output_root / "config.json", "w", encoding="utf-8") as fp:
         json.dump(summary, fp, indent=2)
@@ -183,6 +198,8 @@ def train(cfg: TrainConfig) -> None:
             smoothing=cfg.label_smoothing,
             learning_rate=cfg.learning_rate,
             noise_std=cfg.noise_std,
+            img_shape=img_shape,
+            num_classes=num_classes,
         )
 
         callbacks = [
@@ -222,6 +239,8 @@ def train(cfg: TrainConfig) -> None:
                 smoothing=0.0,
                 learning_rate=cfg.learning_rate,
                 noise_std=0.0,
+                img_shape=img_shape,
+                num_classes=num_classes,
             )
             logits_model.set_weights(model.get_weights())
             logits_model.save_weights(expert_dir / "logits.weights.h5")

@@ -26,6 +26,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--subset-seed", type=int, default=42)
     parser.add_argument("--noise-std", type=float, default=0.05)
     parser.add_argument("--logits-only", action="store_true", help="Train experts without softmax head.")
+    parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100")
 
     parser.add_argument("--experts-output", type=Path, default=Path("./models/cifar_sub_experts"))
     parser.add_argument("--gating-output", type=Path, default=Path("./models/pso_gating"))
@@ -55,6 +56,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             subset_seed=args.subset_seed,
             output_root=args.experts_output,
             noise_std=args.noise_std,
+            dataset=args.dataset,
         )
         train(cfg)
 
@@ -80,6 +82,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
             str(args.pso_iterations),
             "--particles",
             str(args.pso_particles),
+            "--dataset",
+            args.dataset,
         ]
         pso_train.main(pso_args)
 
