@@ -29,7 +29,13 @@ class EvalBatch:
 class EvaluationSet:
     """In-memory evaluation dataset reused across particle evaluations."""
 
-    def __init__(self, images: np.ndarray, labels: np.ndarray, expert_logits: np.ndarray, batch_size: int) -> None:
+    def __init__(
+        self,
+        images: np.ndarray,
+        labels: np.ndarray,
+        expert_logits: np.ndarray,
+        batch_size: int,
+    ) -> None:
         self.images = images
         self.labels = labels
         self.expert_logits = expert_logits
@@ -60,11 +66,13 @@ class WeightAdapter:
 
     def assign_from_vector(self, vector: np.ndarray) -> None:
         if vector.size != self.dimension:
-            raise ValueError(f"Vector length {vector.size} != expected {self.dimension}")
+            raise ValueError(
+                f"Vector length {vector.size} != expected {self.dimension}"
+            )
         weights = []
         offset = 0
         for shape, count in zip(self.shapes, self.counts):
-            segment = vector[offset:offset + count]
+            segment = vector[offset : offset + count]
             weights.append(segment.reshape(shape))
             offset += count
         self.model.set_weights(weights)
@@ -76,7 +84,11 @@ class WeightAdapter:
         return flat + noise
 
 
-def normalize_images(images: np.ndarray, mean: tuple[float, float, float], std: tuple[float, float, float]) -> np.ndarray:
+def normalize_images(
+    images: np.ndarray,
+    mean: tuple[float, float, float],
+    std: tuple[float, float, float],
+) -> np.ndarray:
     images = images.astype("float32") / 255.0
     mean_arr = np.asarray(mean, dtype=np.float32)
     std_arr = np.asarray(std, dtype=np.float32)
@@ -96,7 +108,9 @@ def load_expert_models(
         expert_dir = expert_root / f"expert_{expert_id:02d}"
         weights_path = expert_dir / "logits.weights.h5"
         if not weights_path.exists():
-            raise FileNotFoundError(f"Weights not found for expert {expert_id}: {weights_path}")
+            raise FileNotFoundError(
+                f"Weights not found for expert {expert_id}: {weights_path}"
+            )
         model = build_sub_expert_model(
             use_softmax=False,
             smoothing=0.0,
@@ -110,7 +124,9 @@ def load_expert_models(
     return models
 
 
-def precompute_expert_logits(models: list[keras.Model], images: np.ndarray, batch_size: int) -> np.ndarray:
+def precompute_expert_logits(
+    models: list[keras.Model], images: np.ndarray, batch_size: int
+) -> np.ndarray:
     logits_per_expert = []
     for model in models:
         logits = model.predict(images, batch_size=batch_size, verbose=0)
@@ -155,7 +171,9 @@ class ParticleSwarmOptimizer:
         self.iterations = iterations
         self.rng = rng
 
-        self.positions = np.stack([weight_adapter.sample_initial(rng) for _ in range(num_particles)])
+        self.positions = np.stack(
+            [weight_adapter.sample_initial(rng) for _ in range(num_particles)]
+        )
         self.velocities = np.zeros_like(self.positions)
         self.personal_best_positions = self.positions.copy()
         self.personal_best_scores = np.full(num_particles, -np.inf)
@@ -184,11 +202,20 @@ class ParticleSwarmOptimizer:
 
                 r1 = self.rng.random(self.dimension)
                 r2 = self.rng.random(self.dimension)
-                cognitive_term = self.cognitive * r1 * (self.personal_best_positions[idx] - position)
+                cognitive_term = (
+                    self.cognitive * r1 * (self.personal_best_positions[idx] - position)
+                )
                 social_term = self.social * r2 * (self.global_best_position - position)
-                self.velocities[idx] = inertia * self.velocities[idx] + cognitive_term + social_term
+                self.velocities[idx] = (
+                    inertia * self.velocities[idx] + cognitive_term + social_term
+                )
                 if self.v_max is not None and self.v_max > 0:
-                    np.clip(self.velocities[idx], -self.v_max, self.v_max, out=self.velocities[idx])
+                    np.clip(
+                        self.velocities[idx],
+                        -self.v_max,
+                        self.v_max,
+                        out=self.velocities[idx],
+                    )
                 self.positions[idx] = position + self.velocities[idx]
 
             # snapshot average gating matrix for the current global best
@@ -201,12 +228,14 @@ class ParticleSwarmOptimizer:
             except Exception:
                 avg_gating = None
 
-            self.history.append({
-                "iteration": iteration,
-                "inertia": inertia,
-                "best_score": self.global_best_score,
-                "avg_gating": avg_gating,
-            })
+            self.history.append(
+                {
+                    "iteration": iteration,
+                    "inertia": inertia,
+                    "best_score": self.global_best_score,
+                    "avg_gating": avg_gating,
+                }
+            )
 
             # early stopping check
             improved = self.global_best_score > prev_best + 1e-12
@@ -214,7 +243,10 @@ class ParticleSwarmOptimizer:
                 self._no_improve = 0
             else:
                 self._no_improve += 1
-                if self.early_stop_patience and self._no_improve >= self.early_stop_patience:
+                if (
+                    self.early_stop_patience
+                    and self._no_improve >= self.early_stop_patience
+                ):
                     break
         return self.global_best_position, self.history
 
@@ -248,7 +280,9 @@ class FitnessEvaluator:
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
-        mask = np.ones((num_experts, num_experts), dtype=np.float32) - np.eye(num_experts, dtype=np.float32)
+        mask = np.ones((num_experts, num_experts), dtype=np.float32) - np.eye(
+            num_experts, dtype=np.float32
+        )
         self.redundancy_mask = tf.constant(mask[None, ...])
 
     def __call__(self, vector: np.ndarray) -> FitnessResult:
@@ -266,7 +300,9 @@ class FitnessEvaluator:
             expert_logits = tf.convert_to_tensor(batch.expert_logits)
 
             gating_logits = self.gating_model(images, training=False)
-            gating_logits = tf.reshape(gating_logits, (-1, self.num_experts, self.num_experts))
+            gating_logits = tf.reshape(
+                gating_logits, (-1, self.num_experts, self.num_experts)
+            )
             gating_matrix = tf.nn.softmax(gating_logits, axis=-1)
 
             mixture = expert_logits
@@ -288,8 +324,14 @@ class FitnessEvaluator:
             )
             redundancy_matrix = tf.abs(redundancy_matrix * self.redundancy_mask)
             redundancy_accum += float(tf.reduce_mean(redundancy_matrix).numpy())
-            complexity_accum += float(tf.reduce_mean(tf.reduce_sum(tf.abs(gating_matrix), axis=[1, 2])).numpy())
-            smoothness_accum += float((smooth_batch / max(1, self.recurrent_steps)).numpy())
+            complexity_accum += float(
+                tf.reduce_mean(
+                    tf.reduce_sum(tf.abs(gating_matrix), axis=[1, 2])
+                ).numpy()
+            )
+            smoothness_accum += float(
+                (smooth_batch / max(1, self.recurrent_steps)).numpy()
+            )
 
             total_correct += int(tf.reduce_sum(correct).numpy())
             total_samples += labels.shape[0]
@@ -320,7 +362,9 @@ class FitnessEvaluator:
         for batch in self.eval_set.iterate():
             images = tf.convert_to_tensor(batch.images)
             gating_logits = self.gating_model(images, training=False)
-            gating_logits = tf.reshape(gating_logits, (-1, self.num_experts, self.num_experts))
+            gating_logits = tf.reshape(
+                gating_logits, (-1, self.num_experts, self.num_experts)
+            )
             gating_matrix = tf.nn.softmax(gating_logits, axis=-1)
             mean_matrix = tf.reduce_mean(gating_matrix, axis=0)  # shape (N, N)
             arr = mean_matrix.numpy()
@@ -336,7 +380,9 @@ class FitnessEvaluator:
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimise gating network with PSO")
-    parser.add_argument("--experts", type=Path, default=Path("./models/cifar_sub_experts"))
+    parser.add_argument(
+        "--experts", type=Path, default=Path("./models/cifar_sub_experts")
+    )
     parser.add_argument("--num-experts", type=int, default=8)
     parser.add_argument("--sample-count", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -346,7 +392,9 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("./models/pso_gating"))
     parser.add_argument("--iterations", type=int, default=config.PSO_DEFAULT_ITERATIONS)
     parser.add_argument("--particles", type=int, default=config.PSO_DEFAULT_PARTICLES)
-    parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100")
+    parser.add_argument(
+        "--dataset", choices=["cifar100", "cifar10"], default="cifar100"
+    )
     return parser.parse_args(argv)
 
 
@@ -381,10 +429,14 @@ def main(argv: Iterable[str] | None = None) -> None:
         img_shape=img_shape,
         num_classes=num_classes,
     )
-    expert_logits = precompute_expert_logits(expert_models, images, batch_size=args.batch_size)
+    expert_logits = precompute_expert_logits(
+        expert_models, images, batch_size=args.batch_size
+    )
 
     eval_set = EvaluationSet(images, labels, expert_logits, batch_size=args.batch_size)
-    gating_model = build_gating_model(args.num_experts, args.hidden_units, img_shape=img_shape)
+    gating_model = build_gating_model(
+        args.num_experts, args.hidden_units, img_shape=img_shape
+    )
     weight_adapter = WeightAdapter(gating_model)
 
     evaluator = FitnessEvaluator(
@@ -423,17 +475,26 @@ def main(argv: Iterable[str] | None = None) -> None:
     # also write CSV & numpy history artifacts
     try:
         import csv
-        with open(args.output / "fitness.csv", "w", newline="", encoding="utf-8") as csvfp:
+
+        with open(
+            args.output / "fitness.csv", "w", newline="", encoding="utf-8"
+        ) as csvfp:
             writer = csv.writer(csvfp)
             writer.writerow(["iteration", "inertia", "best_score"])
             for row in history:
-                writer.writerow([row.get("iteration"), row.get("inertia"), row.get("best_score")])
+                writer.writerow(
+                    [row.get("iteration"), row.get("inertia"), row.get("best_score")]
+                )
     except Exception as e:  # pragma: no cover - best effort
         print("Failed to write fitness.csv:", e)
 
     try:
         # extract avg gating matrices into ndarray (iterations, N, N)
-        matrices = [np.asarray(h["avg_gating"], dtype=np.float32) for h in history if h.get("avg_gating") is not None]
+        matrices = [
+            np.asarray(h["avg_gating"], dtype=np.float32)
+            for h in history
+            if h.get("avg_gating") is not None
+        ]
         if matrices:
             arr = np.stack(matrices, axis=0)
             np.save(args.output / "C_history.npy", arr)

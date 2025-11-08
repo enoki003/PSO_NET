@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-import tomllib
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - fallback for Python 3.10
+    import tomli as tomllib  # type: ignore[assignment]
 
 from . import ensemble_eval, moe_train, pso_train, random_gate, single_cnn, stacking_fit
 from .train_sub import TrainConfig, train as train_experts

@@ -41,15 +41,28 @@ class TrainArgs:
 
 
 def parse_args(argv: Iterable[str] | None = None) -> TrainArgs:
-    parser = argparse.ArgumentParser(description="Train single CNN baseline on CIFAR datasets")
+    parser = argparse.ArgumentParser(
+        description="Train single CNN baseline on CIFAR datasets"
+    )
     parser.add_argument("--dataset", choices=["cifar10", "cifar100"], default="cifar10")
-    parser.add_argument("--split", action="store_true", help="Use Split-CIFAR-10 sequential training")
-    parser.add_argument("--memory-size", type=int, default=0, help="Replay buffer size for split mode")
-    parser.add_argument("--epochs", type=int, default=60, help="Epochs per run (per task when --split)")
+    parser.add_argument(
+        "--split", action="store_true", help="Use Split-CIFAR-10 sequential training"
+    )
+    parser.add_argument(
+        "--memory-size", type=int, default=0, help="Replay buffer size for split mode"
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=60, help="Epochs per run (per task when --split)"
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--noise-std", type=float, default=0.05)
-    parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation split fraction for standard mode")
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.1,
+        help="Validation split fraction for standard mode",
+    )
     parser.add_argument("--early-stop-patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--output", type=Path, default=Path("./results/single"))
@@ -73,14 +86,22 @@ def history_to_dict(history: tf.keras.callbacks.History) -> dict[str, List[float
     return {key: [float(v) for v in values] for key, values in history.history.items()}
 
 
-def evaluate_dataset(model: tf.keras.Model, images: np.ndarray, labels: np.ndarray, batch_size: int) -> dict[str, float]:
+def evaluate_dataset(
+    model: tf.keras.Model, images: np.ndarray, labels: np.ndarray, batch_size: int
+) -> dict[str, float]:
     ds = tf.data.Dataset.from_tensor_slices((images, labels))
     ds = ds.batch(batch_size).prefetch(AUTOTUNE)
     result = model.evaluate(ds, verbose=0, return_dict=True)
     return {key: float(val) for key, val in result.items()}
 
 
-def stratified_split(indices: np.ndarray, labels: np.ndarray, classes: int, val_fraction: float, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
+def stratified_split(
+    indices: np.ndarray,
+    labels: np.ndarray,
+    classes: int,
+    val_fraction: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
     train_idx: List[int] = []
     val_idx: List[int] = []
     for cls in range(classes):
@@ -103,7 +124,9 @@ def update_memory(
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
     if capacity <= 0:
-        return np.empty((0,) + new_images.shape[1:], dtype=new_images.dtype), np.empty((0,), dtype=new_labels.dtype)
+        return np.empty((0,) + new_images.shape[1:], dtype=new_images.dtype), np.empty(
+            (0,), dtype=new_labels.dtype
+        )
     if mem_images.size == 0:
         mem_images = new_images.copy()
         mem_labels = new_labels.copy()
@@ -116,7 +139,9 @@ def update_memory(
     return mem_images[idx], mem_labels[idx]
 
 
-def prepare_model(args: TrainArgs, img_shape: Tuple[int, int, int], num_classes: int) -> tf.keras.Model:
+def prepare_model(
+    args: TrainArgs, img_shape: Tuple[int, int, int], num_classes: int
+) -> tf.keras.Model:
     return build_sub_expert_model(
         use_softmax=False,
         smoothing=0.0,
@@ -168,7 +193,9 @@ def train_standard(args: TrainArgs) -> Tuple[dict[str, object], tf.keras.Model]:
 
     rng = np.random.default_rng(args.seed)
     indices = np.arange(x_train.shape[0], dtype=np.int32)
-    train_idx, val_idx = stratified_split(indices, y_train, num_classes, args.val_fraction, rng)
+    train_idx, val_idx = stratified_split(
+        indices, y_train, num_classes, args.val_fraction, rng
+    )
 
     x_train_norm = normalize_images(x_train[train_idx], mean, std)
     y_train_split = y_train[train_idx]
@@ -225,9 +252,15 @@ def train_split_cifar10(args: TrainArgs) -> Tuple[dict[str, object], tf.keras.Mo
         raise ValueError("Split mode only supports CIFAR-10")
 
     data = load_cifar10_split(val_fraction=args.val_fraction, seed=args.seed)
-    x_train = normalize_images(data.x_train, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD)
-    x_val = normalize_images(data.x_val, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD)
-    x_test = normalize_images(data.x_test, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD)
+    x_train = normalize_images(
+        data.x_train, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
+    )
+    x_val = normalize_images(
+        data.x_val, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
+    )
+    x_test = normalize_images(
+        data.x_test, config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
+    )
     y_train = data.y_train.astype(np.int32)
     y_val = data.y_val.astype(np.int32)
     y_test = data.y_test.astype(np.int32)
@@ -286,8 +319,14 @@ def train_split_cifar10(args: TrainArgs) -> Tuple[dict[str, object], tf.keras.Mo
             verbose=1,
         )
 
-        val_metrics = {k: float(v) for k, v in model.evaluate(val_ds, verbose=0, return_dict=True).items()}
-        test_metrics = {k: float(v) for k, v in model.evaluate(test_ds, verbose=0, return_dict=True).items()}
+        val_metrics = {
+            k: float(v)
+            for k, v in model.evaluate(val_ds, verbose=0, return_dict=True).items()
+        }
+        test_metrics = {
+            k: float(v)
+            for k, v in model.evaluate(test_ds, verbose=0, return_dict=True).items()
+        }
 
         task_records.append(
             {
