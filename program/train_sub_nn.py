@@ -5,9 +5,11 @@ import os
 
 
 isCLI = False
+test = False
 epochs = 1
-batch_size = 64 
-output_dir = './models/test_model' 
+batch_size = 64
+num_of_model = 10
+output_dir = './models/test_model'
 
 
 if isCLI:
@@ -30,10 +32,10 @@ X_test = X_test.reshape(10000, 784).astype('float32') / 255
 y_train = to_categorical(y_train, 10)
 y_test = to_categorical(y_test, 10)
 
-model = build_model(num_classes=10, use_softmax=True)
+model = build_model(num_classes=10, use_softmax=test)
 model.fit(X_train, y_train,
-          epochs=1,
-          batch_size=64,
+          epochs=epochs,
+          batch_size=batch_size,
           validation_data=(X_test, y_test)
     )
 
