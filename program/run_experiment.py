@@ -92,6 +92,7 @@ def run_experts_stage(
         subset_pool_fraction=float(cfg.get("subset_pool_fraction", 0.2)),
         epochs=int(cfg.get("epochs", 3)),
         batch_size=int(cfg.get("batch_size", 128)),
+        val_fraction=float(cfg.get("val_fraction", 0.1)),
         label_smoothing=float(cfg.get("label_smoothing", 0.1)),
         learning_rate=float(cfg.get("learning_rate", defaults.learning_rate)),
         subset_seed=int(cfg.get("subset_seed", defaults.seed)),
@@ -156,6 +157,9 @@ def run_pso_stage(
         "--recurrent-steps",
         str(recurrent_steps),
     ]
+    # New: allow choosing optimisation split; default to 'train' for unbiased testing later
+    optimize_split = str(cfg.get("optimize_split", "train"))
+    args.extend(["--optimize-split", optimize_split])
 
     print(f"[run_experiment] Running PSO optimisation -> {output_dir}")
     ensure_parent(output_dir)
@@ -490,16 +494,51 @@ def run_experiment(config_path: Path, overrides: Dict[str, bool] | None = None) 
             baselines_cfg["stacking"]["enabled"] = False
 
     if baselines_cfg:
-        baselines_summary["single_cnn"] = run_single_cnn_stage(baselines_cfg.get("single_cnn", {}), defaults, paths)
-        baselines_summary["ensemble"] = run_ensemble_stage(baselines_cfg.get("ensemble", {}), defaults, paths, experts_output)
-        baselines_summary["random_gate"] = run_random_gate_stage(baselines_cfg.get("random_gate", {}), defaults, paths, experts_output)
-        baselines_summary["moe"] = run_moe_stage(baselines_cfg.get("moe", {}), defaults, paths, experts_output)
-        baselines_summary["stacking"] = run_stacking_stage(baselines_cfg.get("stacking", {}), defaults, paths, experts_output)
+        # Only execute stages explicitly enabled to avoid overwriting prior results with 'skipped'
+        if baselines_cfg.get("single_cnn", {}).get("enabled", False):
+            baselines_summary["single_cnn"] = run_single_cnn_stage(baselines_cfg.get("single_cnn", {}), defaults, paths)
+        if baselines_cfg.get("ensemble", {}).get("enabled", False):
+            baselines_summary["ensemble"] = run_ensemble_stage(baselines_cfg.get("ensemble", {}), defaults, paths, experts_output)
+        if baselines_cfg.get("random_gate", {}).get("enabled", False):
+            baselines_summary["random_gate"] = run_random_gate_stage(baselines_cfg.get("random_gate", {}), defaults, paths, experts_output)
+        if baselines_cfg.get("moe", {}).get("enabled", False):
+            baselines_summary["moe"] = run_moe_stage(baselines_cfg.get("moe", {}), defaults, paths, experts_output)
+        if baselines_cfg.get("stacking", {}).get("enabled", False):
+            baselines_summary["stacking"] = run_stacking_stage(baselines_cfg.get("stacking", {}), defaults, paths, experts_output)
     summary["stages"]["baselines"] = baselines_summary
 
     shutil.copy2(config_path, results_dir / "experiment_config.toml")
-    with open(results_dir / "experiment_summary.json", "w", encoding="utf-8") as fp:
-        json.dump(summary, fp, indent=2)
+    # Append/merge into existing summary if present (do not clobber completed stages with 'skipped')
+    final_summary: Dict[str, Any] = summary
+    existing_path = results_dir / "experiment_summary.json"
+    if existing_path.exists():
+        with existing_path.open("r", encoding="utf-8") as fp:
+            existing = json.load(fp)
+        final = existing
+        # Update experiment meta minimally
+        final.setdefault("experiment", {}).update({
+            "config": summary["experiment"].get("config"),
+            "results_dir": summary["experiment"].get("results_dir"),
+            "experts_dir": summary["experiment"].get("experts_dir"),
+        })
+        final.setdefault("stages", {})
+        # Experts stage
+        new_experts = summary["stages"].get("experts")
+        if new_experts and new_experts.get("status") == "completed":
+            final["stages"]["experts"] = new_experts
+        # PSO stage
+        new_pso = summary["stages"].get("pso")
+        if new_pso and new_pso.get("status") == "completed":
+            final["stages"]["pso"] = new_pso
+        # Baselines: update only completed ones to preserve prior results
+        new_base = summary["stages"].get("baselines", {})
+        base_final = final["stages"].setdefault("baselines", {})
+        for key, val in new_base.items():
+            if isinstance(val, dict) and val.get("status") == "completed":
+                base_final[key] = val
+        final_summary = final
+    with open(existing_path, "w", encoding="utf-8") as fp:
+        json.dump(final_summary, fp, indent=2)
     print(f"[run_experiment] Summary written to {results_dir / 'experiment_summary.json'}")
     return summary
 
