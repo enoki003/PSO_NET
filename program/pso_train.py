@@ -399,6 +399,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--recurrent-steps", type=int, default=config.PSO_RECURRENT_STEPS)
     parser.add_argument("--log-interval", type=int, default=5, help="Print progress every N iterations")
     parser.add_argument("--profile", action="store_true", help="Print per-iteration timing for debug")
+    parser.add_argument(
+        "--optimize-split",
+        choices=["train", "test", "both"],
+        default="train",
+        help="Data split used to optimise PSO weights: training set, test set, or both (legacy)",
+    )
     return parser.parse_args(argv)
 
 
@@ -417,14 +423,25 @@ def main(argv: Iterable[str] | None = None) -> None:
         img_shape = config.CIFAR10_IMG_SHAPE
         num_classes = config.CIFAR10_NUM_CLASSES
 
-    images = np.concatenate([x_train, x_test], axis=0)
-    labels = np.concatenate([y_train, y_test], axis=0).squeeze().astype(np.int32)
-    images = normalize_images(images, mean, std)
+    # Normalise all splits up-front
+    x_train = normalize_images(x_train, mean, std)
+    x_test = normalize_images(x_test, mean, std)
+    y_train = y_train.squeeze().astype(np.int32)
+    y_test = y_test.squeeze().astype(np.int32)
 
-    if args.sample_count and args.sample_count < images.shape[0]:
-        indices = rng.choice(images.shape[0], size=args.sample_count, replace=False)
-        images = images[indices]
-        labels = labels[indices]
+    # Select optimisation split
+    if args.optimize_split == "train":
+        opt_images, opt_labels = x_train, y_train
+    elif args.optimize_split == "test":
+        opt_images, opt_labels = x_test, y_test
+    else:  # both (legacy behaviour)
+        opt_images = np.concatenate([x_train, x_test], axis=0)
+        opt_labels = np.concatenate([y_train, y_test], axis=0)
+
+    if args.sample_count and args.sample_count < opt_images.shape[0]:
+        indices = rng.choice(opt_images.shape[0], size=args.sample_count, replace=False)
+        opt_images = opt_images[indices]
+        opt_labels = opt_labels[indices]
 
     expert_models = load_expert_models(
         args.experts,
@@ -434,10 +451,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         num_classes=num_classes,
     )
     expert_logits = precompute_expert_logits(
-        expert_models, images, batch_size=args.batch_size
+        expert_models, opt_images, batch_size=args.batch_size
     )
 
-    eval_set = EvaluationSet(images, labels, expert_logits, batch_size=args.batch_size)
+    eval_set = EvaluationSet(opt_images, opt_labels, expert_logits, batch_size=args.batch_size)
     gating_model = build_gating_model(
         args.num_experts, args.hidden_units, img_shape=img_shape
     )
@@ -531,7 +548,23 @@ def main(argv: Iterable[str] | None = None) -> None:
     best_vector = optimizer.global_best_position
     total_time = time.time() - start_time
     print(f"[pso] optimisation finished in {total_time/60:.2f} minutes; iterations={len(history)}")
-    best_result = evaluator(best_vector)
+    best_result_train = evaluator(best_vector)
+
+    # Evaluate on held-out test set for an unbiased estimate
+    test_logits = precompute_expert_logits(expert_models, x_test, batch_size=args.batch_size)
+    test_eval_set = EvaluationSet(x_test, y_test, test_logits, batch_size=args.batch_size)
+    test_evaluator = FitnessEvaluator(
+        weight_adapter=weight_adapter,
+        gating_model=gating_model,
+        eval_set=test_eval_set,
+        num_experts=args.num_experts,
+        recurrent_steps=max(1, args.recurrent_steps),
+        alpha=config.FITNESS_ALPHA,
+        beta=config.FITNESS_BETA,
+        gamma=config.FITNESS_GAMMA,
+        delta=config.FITNESS_DELTA,
+    )
+    best_result_test = test_evaluator(best_vector)
 
     args.output.mkdir(parents=True, exist_ok=True)
     np.save(args.output / "gating_weights.npy", best_vector)
@@ -568,22 +601,43 @@ def main(argv: Iterable[str] | None = None) -> None:
     with open(args.output / "fitness.json", "w", encoding="utf-8") as fp:
         json.dump(
             {
-                "score": best_result.score,
-                "accuracy": best_result.accuracy,
-                "redundancy": best_result.redundancy,
-                "complexity": best_result.complexity,
-                "smoothness": best_result.smoothness,
+                # Keep top-level metrics mapped to test (unbiased) for downstream tools
+                "score": best_result_test.score,
+                "accuracy": best_result_test.accuracy,
+                "redundancy": best_result_test.redundancy,
+                "complexity": best_result_test.complexity,
+                "smoothness": best_result_test.smoothness,
+                # Include both splits for auditing
+                "train": {
+                    "score": best_result_train.score,
+                    "accuracy": best_result_train.accuracy,
+                    "redundancy": best_result_train.redundancy,
+                    "complexity": best_result_train.complexity,
+                    "smoothness": best_result_train.smoothness,
+                    "samples": int(opt_labels.shape[0]),
+                },
+                "test": {
+                    "score": best_result_test.score,
+                    "accuracy": best_result_test.accuracy,
+                    "redundancy": best_result_test.redundancy,
+                    "complexity": best_result_test.complexity,
+                    "smoothness": best_result_test.smoothness,
+                    "samples": int(y_test.shape[0]),
+                },
+                "optimize_split": args.optimize_split,
             },
             fp,
             indent=2,
         )
 
     print("PSO optimisation complete.")
-    print("Best fitness:", best_result.score)
-    print("Accuracy:", best_result.accuracy)
-    print("Redundancy:", best_result.redundancy)
-    print("Complexity:", best_result.complexity)
-    print("Smoothness:", best_result.smoothness)
+    print("Best fitness (train):", best_result_train.score)
+    print("Accuracy (train):", best_result_train.accuracy)
+    print("Best fitness (test):", best_result_test.score)
+    print("Accuracy (test):", best_result_test.accuracy)
+    print("Redundancy (test):", best_result_test.redundancy)
+    print("Complexity (test):", best_result_test.complexity)
+    print("Smoothness (test):", best_result_test.smoothness)
 
 
 if __name__ == "__main__":

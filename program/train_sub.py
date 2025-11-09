@@ -27,6 +27,7 @@ class TrainConfig:
     subset_pool_fraction: float = 0.2
     epochs: int = 3
     batch_size: int = 128
+    val_fraction: float = 0.1
     label_smoothing: float = 0.1
     learning_rate: float = 1e-3
     subset_seed: int = 42
@@ -41,6 +42,7 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
     parser.add_argument("--subset-pool-fraction", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--subset-seed", type=int, default=42)
@@ -56,6 +58,7 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
         subset_pool_fraction=args.subset_pool_fraction,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        val_fraction=args.val_fraction,
         label_smoothing=args.label_smoothing,
         learning_rate=args.learning_rate,
         subset_seed=args.subset_seed,
@@ -95,6 +98,33 @@ def stratified_subsets(labels: np.ndarray, experts: int, pool_fraction: float, s
         rng.shuffle(idxs)
         result.append(np.array(idxs, dtype=np.int32))
     return result
+
+
+def stratified_train_val_split(
+    labels: np.ndarray,
+    *,
+    num_classes: int,
+    val_fraction: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stratified split of training indices into train/val.
+
+    Ensures each class contributes roughly ``val_fraction`` to validation.
+    """
+    rng = np.random.default_rng(seed)
+    labels = labels.squeeze().astype(np.int32)
+    indices = np.arange(labels.shape[0], dtype=np.int32)
+    train_idx: list[int] = []
+    val_idx: list[int] = []
+    for cls in range(num_classes):
+        cls_indices = indices[labels == cls]
+        if cls_indices.size == 0:
+            continue
+        rng.shuffle(cls_indices)
+        val_count = int(cls_indices.size * val_fraction)
+        val_idx.extend(cls_indices[:val_count])
+        train_idx.extend(cls_indices[val_count:])
+    return np.asarray(train_idx, dtype=np.int32), np.asarray(val_idx, dtype=np.int32)
 
 
 def augment_image(image: tf.Tensor) -> tf.Tensor:
@@ -140,8 +170,6 @@ def train(cfg: TrainConfig) -> None:
     x_train = normalize_images(x_train, mean, std)
     x_test = normalize_images(x_test, mean, std)
 
-    index_sets = stratified_subsets(y_train, cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed, num_classes)
-
     if cfg.train_with_softmax:
         # Keras 3: to_categorical no longer accepts dtype; cast explicitly
         y_train_proc = to_categorical(y_train, num_classes=num_classes).astype("float32")
@@ -150,9 +178,18 @@ def train(cfg: TrainConfig) -> None:
         y_train_proc = y_train.squeeze().astype("int32")
         y_test_proc = y_test.squeeze().astype("int32")
 
+    # Build a validation set from the training data (no test leakage)
+    train_idx, val_idx = stratified_train_val_split(
+        y_train, num_classes=num_classes, val_fraction=cfg.val_fraction, seed=cfg.subset_seed
+    )
+    x_train_split = x_train[train_idx]
+    y_train_split = y_train_proc[train_idx]
+    x_val_split = x_train[val_idx]
+    y_val_split = y_train_proc[val_idx]
+
     val_dataset = build_dataset(
-        x_test,
-        y_test_proc,
+        x_val_split,
+        y_val_split,
         batch_size=cfg.batch_size,
         augment=False,
         shuffle=False,
@@ -177,12 +214,15 @@ def train(cfg: TrainConfig) -> None:
     with open(cfg.output_root / "config.json", "w", encoding="utf-8") as fp:
         json.dump(summary, fp, indent=2)
 
+    # Build expert-specific index subsets over the training split (not full original indices)
+    index_sets = stratified_subsets(y_train[train_idx], cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed, num_classes)
+
     for expert_id, indices in enumerate(index_sets):
         expert_dir = cfg.output_root / f"expert_{expert_id:02d}"
         expert_dir.mkdir(parents=True, exist_ok=True)
 
-        expert_images = x_train[indices]
-        expert_labels = y_train_proc[indices]
+        expert_images = x_train_split[indices]
+        expert_labels = y_train_split[indices]
 
         train_dataset = build_dataset(
             expert_images,
@@ -207,7 +247,7 @@ def train(cfg: TrainConfig) -> None:
                 factor=0.3,
                 patience=2,
                 min_lr=1e-5,
-                monitor="val_accuracy",
+                monitor="val_acc",
                 mode="max",  # 明示: 精度は最大化
                 verbose=1,
             )
@@ -232,6 +272,22 @@ def train(cfg: TrainConfig) -> None:
             fp.write(model.to_json())
 
         np.save(expert_dir / "train_indices.npy", indices, allow_pickle=False)
+
+        # Optional: record held-out test performance of this expert for transparency
+        try:
+            test_ds = build_dataset(
+                x_test,
+                y_test_proc,
+                batch_size=cfg.batch_size,
+                augment=False,
+                shuffle=False,
+                seed=cfg.subset_seed,
+            )
+            test_metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
+            with open(expert_dir / "test_metrics.json", "w", encoding="utf-8") as fp:
+                json.dump({k: float(v) for k, v in test_metrics.items()}, fp, indent=2)
+        except Exception:
+            pass
 
         if cfg.train_with_softmax:
             logits_model = build_sub_expert_model(
