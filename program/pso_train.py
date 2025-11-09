@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import json
 import math
 from dataclasses import dataclass
@@ -396,6 +397,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--dataset", choices=["cifar100", "cifar10"], default="cifar100"
     )
     parser.add_argument("--recurrent-steps", type=int, default=config.PSO_RECURRENT_STEPS)
+    parser.add_argument("--log-interval", type=int, default=5, help="Print progress every N iterations")
+    parser.add_argument("--profile", action="store_true", help="Print per-iteration timing for debug")
     return parser.parse_args(argv)
 
 
@@ -466,7 +469,68 @@ def main(argv: Iterable[str] | None = None) -> None:
         early_stop_patience=config.PSO_EARLY_STOP_PATIENCE,
     )
 
-    best_vector, history = optimizer.optimize()
+    start_time = time.time()
+    iteration_times = []
+    best_vector = None
+    history = []
+    # manual optimisation loop with logging to expose progress
+    for iteration in range(optimizer.iterations):
+        t0 = time.time()
+        inertia = optimizer._interpolate_inertia(iteration)
+        prev_best = optimizer.global_best_score
+        for idx in range(optimizer.num_particles):
+            position = optimizer.positions[idx]
+            result = evaluator(position)
+            if result.score > optimizer.personal_best_scores[idx]:
+                optimizer.personal_best_scores[idx] = result.score
+                optimizer.personal_best_positions[idx] = position.copy()
+            if result.score > optimizer.global_best_score:
+                optimizer.global_best_score = result.score
+                optimizer.global_best_position = position.copy()
+            r1 = optimizer.rng.random(optimizer.dimension)
+            r2 = optimizer.rng.random(optimizer.dimension)
+            cognitive_term = optimizer.cognitive * r1 * (optimizer.personal_best_positions[idx] - position)
+            social_term = optimizer.social * r2 * (optimizer.global_best_position - position)
+            optimizer.velocities[idx] = inertia * optimizer.velocities[idx] + cognitive_term + social_term
+            if optimizer.v_max is not None and optimizer.v_max > 0:
+                np.clip(optimizer.velocities[idx], -optimizer.v_max, optimizer.v_max, out=optimizer.velocities[idx])
+            optimizer.positions[idx] = position + optimizer.velocities[idx]
+        # snapshot gating matrix
+        try:
+            avg = evaluator.average_gating_matrix(optimizer.global_best_position)
+            avg_gating = np.asarray(avg).tolist()
+        except Exception:
+            avg_gating = None
+        improved = optimizer.global_best_score > prev_best + 1e-12
+        if improved:
+            optimizer._no_improve = 0
+        else:
+            optimizer._no_improve += 1
+        row = {
+            "iteration": iteration,
+            "inertia": inertia,
+            "best_score": optimizer.global_best_score,
+            "avg_gating": avg_gating,
+        }
+        history.append(row)
+        iter_time = time.time() - t0
+        iteration_times.append(iter_time)
+        if args.profile:
+            print(f"[pso] iter {iteration} time={iter_time:.3f}s best={optimizer.global_best_score:.5f}")
+        if getattr(args, "log_interval", None) and iteration % max(1, args.log_interval) == 0:
+            avg_t = sum(iteration_times) / len(iteration_times)
+            remaining = optimizer.iterations - (iteration + 1)
+            eta = remaining * avg_t
+            print(
+                f"[pso] iter {iteration}/{optimizer.iterations - 1} best={optimizer.global_best_score:.5f} "
+                f"improved={'Y' if improved else 'N'} avg_iter={avg_t:.3f}s ETA~{eta/60:.1f}m"
+            )
+        if optimizer.early_stop_patience and optimizer._no_improve >= optimizer.early_stop_patience:
+            print(f"[pso] early stop at iteration {iteration}")
+            break
+    best_vector = optimizer.global_best_position
+    total_time = time.time() - start_time
+    print(f"[pso] optimisation finished in {total_time/60:.2f} minutes; iterations={len(history)}")
     best_result = evaluator(best_vector)
 
     args.output.mkdir(parents=True, exist_ok=True)

@@ -40,6 +40,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--static", action="store_true", help="Generate static PNG plots instead of animation")
     parser.add_argument("--graph", action="store_true", help="When using --static also export graph snapshot")
     parser.add_argument("--static-dir", type=Path, default=Path("./results/viz"), help="Directory for static outputs")
+    parser.add_argument("--writer", choices=["ffmpeg", "pillow", "auto"], default="auto", help="Animation writer backend preference")
     return parser.parse_args(argv)
 
 
@@ -76,6 +77,8 @@ def animate_matrices(
     threshold: float = 0.01,
     fps: int = 6,
     show: bool = False,
+    *,
+    writer_pref: str = "auto",
 ) -> None:
     n = matrices[0].shape[0]
     # fixed node positions on a circle for stable layout
@@ -92,26 +95,51 @@ def animate_matrices(
 
     anim = FuncAnimation(fig, update, frames=len(matrices), interval=max(1, int(1000 / max(1, fps))))
 
-    writer = None
     suffix = out_path.suffix.lower()
-    if suffix == ".gif":
-        try:
-            writer = PillowWriter(fps=fps)
-        except Exception as exc:  # pillow may be missing
-            print(f"GIF writer unavailable ({exc}); falling back to matplotlib default.")
-            writer = None
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def try_ffmpeg() -> bool:
+        from matplotlib.animation import writers
+        return "ffmpeg" in writers.list()
+
+    writer_obj = None
+    if suffix == ".gif":
+        # always prefer Pillow for GIF
+        try:
+            writer_obj = PillowWriter(fps=fps)
+        except Exception as exc:
+            print(f"GIF writer unavailable ({exc}); will attempt default backend.")
+    elif suffix == ".mp4":
+        # choose backend based on availability / user preference
+        if writer_pref in ("auto", "ffmpeg") and try_ffmpeg():
+            # matplotlib will use ffmpeg automatically when available
+            writer_obj = None  # allow anim.save to pick ffmpeg
+        else:
+            # fallback: auto-convert to GIF if Pillow available
+            try:
+                alt_path = out_path.with_suffix(".gif")
+                writer_obj = PillowWriter(fps=fps)
+                print(f"[viz] ffmpeg unavailable; switching output to {alt_path.name} (GIF)")
+                out_path = alt_path
+            except Exception:
+                print("[viz] No ffmpeg or Pillow writer; cannot save animation as mp4/gif.")
+                print("Install system ffmpeg or pip install imageio-ffmpeg pillow.")
+                return
+    else:
+        print(f"[viz] Unknown extension '{suffix}'. Use .mp4 or .gif")
+        return
+
     try:
-        if writer is not None:
-            anim.save(out_path, writer=writer, dpi=150)
+        if writer_obj is not None:
+            anim.save(out_path, writer=writer_obj, dpi=150)
         else:
             anim.save(out_path, fps=fps, dpi=150)
         print(f"Saved animation to {out_path}")
+    except KeyboardInterrupt:
+        print("Interrupted while saving animation; partial file may be unusable.")
     except Exception as exc:
         print(f"Failed to save animation ({exc}).")
-        if not show:
-            print("Re-run with --show after installing ffmpeg/pillow or choose a different format.")
+        print("Install ffmpeg (Linux: sudo apt install ffmpeg) or use --out with .gif plus pillow.")
 
     if show:
         plt.show()
@@ -150,7 +178,7 @@ def load_fitness_curve(history: List[dict], fitness_csv: Path) -> tuple[np.ndarr
 
 def plot_static(history: List[dict], matrices: List[np.ndarray], out_dir: Path, export_graph: bool, threshold: float, show: bool) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    iterations, scores = load_fitness_curve(history, out_dir / "dummy.csv")  # path unused when csv absent
+    iterations, scores = load_fitness_curve(history, out_dir / "dummy.csv")  # placeholder path when csv absent
 
     final_mat: Optional[np.ndarray] = matrices[-1] if matrices else None
 
@@ -201,14 +229,20 @@ def main(argv: Iterable[str] | None = None) -> None:
     history = load_history(args.history)
     mats = extract_matrices(history)
     if args.static:
-        # supply real fitness.csv if it exists for better curve
         if args.fitness_csv.exists():
-            iterations, scores = load_fitness_curve(history, args.fitness_csv)
+            _ = load_fitness_curve(history, args.fitness_csv)  # just to verify readable
         plot_static(history, mats, args.static_dir, args.graph, args.threshold, args.show)
     else:
         if len(mats) == 0:
             raise SystemExit("No gating matrices found in history file for animation")
-        animate_matrices(mats, args.out, threshold=args.threshold, fps=args.fps, show=args.show)
+        animate_matrices(
+            mats,
+            args.out,
+            threshold=args.threshold,
+            fps=args.fps,
+            show=args.show,
+            writer_pref=args.writer,
+        )
 
 
 if __name__ == "__main__":

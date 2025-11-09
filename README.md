@@ -3,9 +3,6 @@
 ## 0. 実装サマリと利用手順
 
 ### 0.1 実装状況
-
-- CIFAR-100 向けサブ専門家トレーナー（`program/train_sub.py`）を実装済み。層化サブセット抽出・データ拡張・softmax/logits 切替に対応。
-- PSO ゲーティング最適化パイプライン（`program/pso_train.py`／`program/train_pipeline.py`）を整備し、平均結合行列を履歴 (`avg_gating`) として記録。
 - ゲーティング遷移のネットワークアニメーション（`program/visualize_gating.py`）で GIF / MP4 出力とインタラクティブ確認が可能。
 - 評価指標は精度・冗長性・複雑度・滑らかさを JSON で出力。FLOPs・モジュラリティの自動算出と継続学習シナリオは未実装。
 
@@ -305,6 +302,11 @@ F(\theta) = \alpha \cdot \text{Acc} - \beta \cdot \text{Redundancy} - \gamma \cd
 
 #### 8.4 コマンド例
 ```bash
+# 設定ファイル駆動の一括実行
+uv run run-experiment --config configs/cifar10_full.toml
+# 例: 既存専門家を再利用して PSO 以降のみ再実行したい場合
+# uv run run-experiment --config configs/cifar10_full.toml --skip-experts
+
 # 固定単一 CNN 学習（Class-IL リプレイ無し）
 uv run single-cnn \
 	--dataset cifar10 \
@@ -354,6 +356,8 @@ FITNESS_BETA=0 uv run pso-train --experts ./models/cifar_sub_experts --iteration
 # ベースライン結果の集約
 uv run aggregate-results ./results/single ./results/ensemble ./results/moe ./results/random ./results/stacking --output ./results/baselines.json
 ```
+
+> `configs/cifar10_full.toml` に実験パラメータ一式のテンプレートを用意。複製して値を調整し、同じ `run-experiment` コマンドで別条件の学習・評価を一括実行できます。
 
 #### 8.5 再現性事項
 - 乱数: データ分割 / PSO / MoE / Stacking で個別 seed を記録。
