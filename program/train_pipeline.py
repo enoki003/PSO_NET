@@ -37,6 +37,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pso-iterations", type=int, default=config.PSO_DEFAULT_ITERATIONS)
     parser.add_argument("--pso-particles", type=int, default=config.PSO_DEFAULT_PARTICLES)
     parser.add_argument("--pso-seed", type=int, default=123)
+    parser.add_argument("--pso-recurrent-steps", type=int, default=config.PSO_RECURRENT_STEPS)
 
     return parser.parse_args(argv)
 
@@ -84,6 +85,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
             str(args.pso_particles),
             "--dataset",
             args.dataset,
+            "--recurrent-steps",
+            str(args.pso_recurrent_steps),
         ]
         pso_train.main(pso_args)
 

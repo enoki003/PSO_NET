@@ -395,6 +395,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dataset", choices=["cifar100", "cifar10"], default="cifar100"
     )
+    parser.add_argument("--recurrent-steps", type=int, default=config.PSO_RECURRENT_STEPS)
     return parser.parse_args(argv)
 
 
@@ -444,7 +445,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         gating_model=gating_model,
         eval_set=eval_set,
         num_experts=args.num_experts,
-        recurrent_steps=config.PSO_RECURRENT_STEPS,
+        recurrent_steps=max(1, args.recurrent_steps),
         alpha=config.FITNESS_ALPHA,
         beta=config.FITNESS_BETA,
         gamma=config.FITNESS_GAMMA,

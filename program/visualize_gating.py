@@ -1,11 +1,19 @@
-"""Visualise gating matrix evolution as a network animation.
+"""Visualise PSO gating matrix evolution and fitness.
 
-Reads `pso_history.json` written by `program.pso_train` and animates the
-average gating matrix per iteration as a weighted directed graph. Edges
-with small weight are dimmed.
+Two modes:
+1. Animation (default) of average gating matrix per iteration rendered
+     as a directed weighted graph.
+2. Static plots (``--static``) writing one or more PNG files:
+     - ``gating_fitness.png``: left = fitness curve (best score over
+         iterations), right = final average gating matrix heatmap.
+     - optional edge graph snapshot ``gating_graph.png`` if ``--graph``.
 
-Note: requires `matplotlib` and `networkx` installed. Save GIF/MP4 via
-matplotlib's writers (ffmpeg/imageio).
+Input artefacts produced by `program.pso_train`:
+    * pso_history.json  (contains per-iteration best_score + avg_gating)
+    * fitness.csv       (optional; if present used for curve speed)
+
+Dependencies: matplotlib, networkx (graph animation), pillow/imageio
+for GIF. Install extras: ``pip install .[viz]``.
 """
 
 from __future__ import annotations
@@ -13,7 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -22,12 +30,16 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Animate PSO gating matrices")
-    parser.add_argument("--history", type=Path, default=Path("./models/pso_gating/pso_history.json"))
-    parser.add_argument("--out", type=Path, default=Path("./models/pso_gating/gating_anim.mp4"))
-    parser.add_argument("--threshold", type=float, default=0.01, help="Edges below this weight are hidden")
-    parser.add_argument("--fps", type=int, default=6)
-    parser.add_argument("--show", action="store_true", help="Display the animation interactively via matplotlib")
+    parser = argparse.ArgumentParser(description="Visualize PSO gating optimisation artefacts")
+    parser.add_argument("--history", type=Path, default=Path("./models/pso_gating/pso_history.json"), help="Path to pso_history.json")
+    parser.add_argument("--fitness-csv", type=Path, default=Path("./models/pso_gating/fitness.csv"), help="Optional fitness.csv path (faster for curve)")
+    parser.add_argument("--out", type=Path, default=Path("./models/pso_gating/gating_anim.mp4"), help="Animation output path (.mp4/.gif)")
+    parser.add_argument("--threshold", type=float, default=0.01, help="Edges below this weight are hidden in graph")
+    parser.add_argument("--fps", type=int, default=6, help="FPS for animation")
+    parser.add_argument("--show", action="store_true", help="Display animation/plots interactively")
+    parser.add_argument("--static", action="store_true", help="Generate static PNG plots instead of animation")
+    parser.add_argument("--graph", action="store_true", help="When using --static also export graph snapshot")
+    parser.add_argument("--static-dir", type=Path, default=Path("./results/viz"), help="Directory for static outputs")
     return parser.parse_args(argv)
 
 
@@ -107,10 +119,13 @@ def animate_matrices(
         plt.close(fig)
 
 
-def load_matrices_from_history(path: Path) -> List[np.ndarray]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    mats = []
-    for entry in data:
+def load_history(path: Path) -> List[dict]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def extract_matrices(history: List[dict]) -> List[np.ndarray]:
+    mats: List[np.ndarray] = []
+    for entry in history:
         mat = entry.get("avg_gating")
         if mat is None:
             continue
@@ -118,12 +133,82 @@ def load_matrices_from_history(path: Path) -> List[np.ndarray]:
     return mats
 
 
+def load_fitness_curve(history: List[dict], fitness_csv: Path) -> tuple[np.ndarray, np.ndarray]:
+    # prefer CSV for speed if it exists
+    if fitness_csv.exists():
+        try:
+            data = np.genfromtxt(fitness_csv, delimiter=",", skip_header=1)
+            iterations = data[:, 0]
+            scores = data[:, 2]
+            return iterations, scores
+        except Exception:
+            pass  # fall back to JSON parsing
+    iterations = np.array([h.get("iteration", i) for i, h in enumerate(history)], dtype=np.int32)
+    scores = np.array([h.get("best_score", np.nan) for h in history], dtype=np.float32)
+    return iterations, scores
+
+
+def plot_static(history: List[dict], matrices: List[np.ndarray], out_dir: Path, export_graph: bool, threshold: float, show: bool) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iterations, scores = load_fitness_curve(history, out_dir / "dummy.csv")  # path unused when csv absent
+
+    final_mat: Optional[np.ndarray] = matrices[-1] if matrices else None
+
+    fig, (ax_curve, ax_heat) = plt.subplots(1, 2, figsize=(10, 4))
+    ax_curve.plot(iterations, scores, color="#1f78b4", linewidth=2)
+    ax_curve.set_xlabel("Iteration")
+    ax_curve.set_ylabel("Best fitness score")
+    ax_curve.grid(alpha=0.3)
+    ax_curve.set_title("Fitness progression")
+
+    if final_mat is not None:
+        im = ax_heat.imshow(final_mat, cmap="viridis")
+        ax_heat.set_title("Final avg gating matrix")
+        plt.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.04)
+    else:
+        ax_heat.text(0.5, 0.5, "No gating matrices", ha="center", va="center")
+        ax_heat.set_axis_off()
+
+    fig.tight_layout()
+    fig_path = out_dir / "gating_fitness.png"
+    fig.savefig(fig_path, dpi=160)
+    print(f"Saved {fig_path}")
+    if not show:
+        plt.close(fig)
+
+    if export_graph and final_mat is not None:
+        # build graph of final matrix
+        G = build_graph_from_matrix(final_mat, threshold=threshold)
+        n = final_mat.shape[0]
+        theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        pos = {i: (np.cos(t), np.sin(t)) for i, t in enumerate(theta)}
+        fig2, ax2 = plt.subplots(figsize=(6, 6))
+        draw_frame(ax2, G, pos)
+        ax2.set_title("Final gating graph")
+        graph_path = out_dir / "gating_graph.png"
+        fig2.savefig(graph_path, dpi=160)
+        print(f"Saved {graph_path}")
+        if not show:
+            plt.close(fig2)
+    if show:
+        plt.show()
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
-    mats = load_matrices_from_history(args.history)
-    if len(mats) == 0:
-        raise SystemExit("No gating matrices found in history file")
-    animate_matrices(mats, args.out, threshold=args.threshold, fps=args.fps, show=args.show)
+    if not args.history.exists():
+        raise SystemExit(f"History file not found: {args.history}")
+    history = load_history(args.history)
+    mats = extract_matrices(history)
+    if args.static:
+        # supply real fitness.csv if it exists for better curve
+        if args.fitness_csv.exists():
+            iterations, scores = load_fitness_curve(history, args.fitness_csv)
+        plot_static(history, mats, args.static_dir, args.graph, args.threshold, args.show)
+    else:
+        if len(mats) == 0:
+            raise SystemExit("No gating matrices found in history file for animation")
+        animate_matrices(mats, args.out, threshold=args.threshold, fps=args.fps, show=args.show)
 
 
 if __name__ == "__main__":

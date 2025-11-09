@@ -24,7 +24,7 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - fallback for Python 3.10
     import tomli as tomllib  # type: ignore[assignment]
 
-from . import ensemble_eval, moe_train, pso_train, random_gate, single_cnn, stacking_fit
+from . import config, ensemble_eval, moe_train, pso_train, random_gate, single_cnn, stacking_fit
 from .train_sub import TrainConfig, train as train_experts
 
 
@@ -46,6 +46,14 @@ class Paths:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run experiment pipeline from a TOML configuration")
     parser.add_argument("--config", type=Path, required=True, help="Path to TOML configuration file")
+    parser.add_argument("--skip-experts", action="store_true", help="Skip expert training stage regardless of config")
+    parser.add_argument("--skip-pso", action="store_true", help="Skip PSO optimisation stage regardless of config")
+    parser.add_argument("--skip-baselines", action="store_true", help="Skip all baseline evaluations regardless of config")
+    parser.add_argument("--skip-single-cnn", action="store_true", help="Skip the single CNN baseline stage")
+    parser.add_argument("--skip-ensemble", action="store_true", help="Skip the ensemble baseline stage")
+    parser.add_argument("--skip-random-gate", action="store_true", help="Skip the random gate baseline stage")
+    parser.add_argument("--skip-moe", action="store_true", help="Skip the MoE baseline stage")
+    parser.add_argument("--skip-stacking", action="store_true", help="Skip the stacking baseline stage")
     return parser.parse_args(argv)
 
 
@@ -121,6 +129,7 @@ def run_pso_stage(
         raise FileNotFoundError(f"Expert directory not found: {experts_dir}")
 
     dataset = str(cfg.get("dataset", defaults.dataset))
+    recurrent_steps = int(cfg.get("recurrent_steps", config.PSO_RECURRENT_STEPS))
     args = [
         "--experts",
         str(experts_dir),
@@ -144,6 +153,8 @@ def run_pso_stage(
         str(cfg.get("particles", 24)),
         "--dataset",
         dataset,
+        "--recurrent-steps",
+        str(recurrent_steps),
     ]
 
     print(f"[run_experiment] Running PSO optimisation -> {output_dir}")
@@ -154,6 +165,7 @@ def run_pso_stage(
         "status": "completed",
         "output": str(output_dir),
         "dataset": dataset,
+        "recurrent_steps": recurrent_steps,
         "cli_args": args,
     }
     fitness = load_json_if_exists(output_dir / "fitness.json")
@@ -409,11 +421,12 @@ def run_stacking_stage(
     return summary
 
 
-def run_experiment(config_path: Path) -> Dict[str, Any]:
+def run_experiment(config_path: Path, overrides: Dict[str, bool] | None = None) -> Dict[str, Any]:
+    overrides = overrides or {}
     with open(config_path, "rb") as fp:
         data = tomllib.load(fp)
 
-    experiment = data.get("experiment", {})
+    experiment = dict(data.get("experiment", {}))
     dataset = str(experiment.get("dataset", "cifar100"))
     num_experts = int(experiment.get("num_experts", 8))
     seed = int(experiment.get("seed", 123))
@@ -444,16 +457,38 @@ def run_experiment(config_path: Path) -> Dict[str, Any]:
         "stages": {},
     }
 
-    experts_summary, experts_output = run_experts_stage(data.get("experts", {}), defaults, paths)
+    experts_cfg = dict(data.get("experts", {}))
+    if overrides.get("skip_experts"):
+        experts_cfg["enabled"] = False
+    experts_summary, experts_output = run_experts_stage(experts_cfg, defaults, paths)
     summary["stages"]["experts"] = experts_summary
     paths.experts_dir = experts_output
     summary["experiment"]["experts_dir"] = str(experts_output)
 
-    pso_summary, _ = run_pso_stage(data.get("pso", {}), defaults, paths, experts_output)
+    pso_cfg = dict(data.get("pso", {}))
+    if overrides.get("skip_pso"):
+        pso_cfg["enabled"] = False
+    pso_summary, _ = run_pso_stage(pso_cfg, defaults, paths, experts_output)
     summary["stages"]["pso"] = pso_summary
 
-    baselines_cfg = data.get("baselines", {})
+    baselines_cfg = {
+        key: dict(value) for key, value in data.get("baselines", {}).items()
+    }
     baselines_summary: Dict[str, Any] = {}
+    if overrides.get("skip_baselines"):
+        baselines_cfg = {}
+    else:
+        if overrides.get("skip_single_cnn") and "single_cnn" in baselines_cfg:
+            baselines_cfg["single_cnn"]["enabled"] = False
+        if overrides.get("skip_ensemble") and "ensemble" in baselines_cfg:
+            baselines_cfg["ensemble"]["enabled"] = False
+        if overrides.get("skip_random_gate") and "random_gate" in baselines_cfg:
+            baselines_cfg["random_gate"]["enabled"] = False
+        if overrides.get("skip_moe") and "moe" in baselines_cfg:
+            baselines_cfg["moe"]["enabled"] = False
+        if overrides.get("skip_stacking") and "stacking" in baselines_cfg:
+            baselines_cfg["stacking"]["enabled"] = False
+
     if baselines_cfg:
         baselines_summary["single_cnn"] = run_single_cnn_stage(baselines_cfg.get("single_cnn", {}), defaults, paths)
         baselines_summary["ensemble"] = run_ensemble_stage(baselines_cfg.get("ensemble", {}), defaults, paths, experts_output)
@@ -471,7 +506,17 @@ def run_experiment(config_path: Path) -> Dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    run_experiment(args.config)
+    overrides = {
+        "skip_experts": args.skip_experts,
+        "skip_pso": args.skip_pso,
+        "skip_baselines": args.skip_baselines,
+        "skip_single_cnn": args.skip_single_cnn,
+        "skip_ensemble": args.skip_ensemble,
+        "skip_random_gate": args.skip_random_gate,
+        "skip_moe": args.skip_moe,
+        "skip_stacking": args.skip_stacking,
+    }
+    run_experiment(args.config, overrides)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
