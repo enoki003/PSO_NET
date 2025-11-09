@@ -369,3 +369,87 @@ uv run aggregate-results ./results/single ./results/ensemble ./results/moe ./res
 - FLOPs / モジュラリティ計測ユーティリティ
 - lbest PSO トポロジ実装と比較
 - 温度付きゲート (Softmax 温度調整) による sparsity 制御
+
+## 9. 実験結果（CIFAR-10: cifar10_fair_comparison）
+
+実験サマリは `configs/results/cifar10_fair/experiment_summary.json` に保存されています（自動生成）。このランでは PSO ステージはスキップされ、各ベースラインと単一 CNN を比較しました。
+
+### 9.1 指標（抜粋）
+
+| 手法 | 指標 | 値 | 備考 |
+|---|---|---:|---|
+|  | Test Top-5 | 0.9971 |  |
+|  | Val Top-1 | 0.9038 |  |
+| Avg Ensemble | Top-1 | 0.6799 | 4096 サンプル評価 |
+|  | Top-5 | 0.9768 |  |
+| PSO | Test Top-1 | 0.6948 | 4096 サンプル |
+| Random Gate | Top-1 (mean±std) | 0.6628 ± 0.0021 | 4096 サンプル, 10 試行 |
+| Grad-MoE | Top-1 | 0.6855 | 4096 サンプル |
+|  | Top-5 | 0.9761 |  |
+| Stacking | Top-1 | 0.7202 |  |
+|  | Top-5 | 0.9808 |  |
+
+出典パス（実ディレクトリ）:
+
+- Single CNN: `configs/results/cifar10_fair/single_cnn/metrics.json`
+- Ensemble: `configs/results/cifar10_fair/ensemble/metrics.json`
+- Random Gate: `configs/results/cifar10_fair/random_gate/metrics.json`
+- MoE: `configs/results/cifar10_fair/moe/test_metrics.json`
+- Stacking: `configs/results/cifar10_fair/stacking/test_metrics.json`
+
+
+### 9.2 所見と解釈
+
+
+
+### 9.3 可視化
+
+学習曲線（Single CNN）:
+
+```
+uv run viz-metrics --input configs/results/cifar10_fair/single_cnn --output configs/results/cifar10_fair/viz
+```
+
+ベースライン比較の棒グラフ（Top-1/Top-5）:
+
+```
+uv run aggregate-results \
+	configs/results/cifar10_fair/ensemble \
+	configs/results/cifar10_fair/random_gate \
+	configs/results/cifar10_fair/moe \
+	configs/results/cifar10_fair/stacking \
+	--output configs/results/cifar10_fair/baselines.json
+
+uv run viz-metrics --input configs/results/cifar10_fair/baselines.json --output configs/results/cifar10_fair/viz
+```
+
+（PSO を実行済みであれば）ゲーティング可視化:
+
+```
+uv run viz-gating --history configs/results/cifar10_fair/pso/pso_history.json --static --static-dir configs/results/cifar10_fair/viz --graph
+```
+
+### 9.4 追試の推奨（PSO-DCN 実行）
+
+本ランでは PSO がスキップされているため、以下で PSO のみを追加実行できます（専門家は再利用）。短時間確認用に小さめの設定例も併記します。
+
+```
+# 設定ファイルの PSO セクションを使って PSO ステージのみ
+uv run run-experiment --config configs/cifar10_full.toml --skip-experts --skip-baselines
+
+# クイック確認（直接実行）：
+uv run pso-train \
+	--experts configs/models/cifar10_experts \
+	--dataset cifar10 \
+	--num-experts 8 \
+	--sample-count 1024 \
+	--particles 8 \
+	--iterations 30 \
+	--recurrent-steps 1 \
+	--hidden-units 128 \
+	--batch-size 128 \
+	--output configs/results/cifar10_fair/pso_quick \
+	--log-interval 2 --profile
+```
+
+実行後は上記の可視化コマンドで `gating_fitness.png` と `gating_graph.png` を確認してください。
