@@ -33,6 +33,7 @@ class TrainConfig:
     subset_seed: int = 42
     output_root: Path = Path("./models/cifar_sub_experts")
     noise_std: float = 0.05
+    class_split: bool = False
     dataset: str = "cifar100"
 
 
@@ -50,6 +51,7 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
     parser.add_argument("--noise-std", type=float, default=0.05)
     parser.add_argument("--no-softmax", dest="train_with_softmax", action="store_false")
     parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100", help="Select dataset")
+    parser.add_argument("--class-split", action="store_true", help="Partition classes across experts (disjoint); overrides subset-pool-fraction")
     parser.set_defaults(train_with_softmax=True)
     args = parser.parse_args(argv)
     return TrainConfig(
@@ -64,6 +66,7 @@ def parse_args(argv: Iterable[str] | None = None) -> TrainConfig:
         subset_seed=args.subset_seed,
         output_root=args.output_root,
         noise_std=args.noise_std,
+        class_split=args.class_split,
         dataset=args.dataset,
     )
 
@@ -215,7 +218,20 @@ def train(cfg: TrainConfig) -> None:
         json.dump(summary, fp, indent=2)
 
     # Build expert-specific index subsets over the training split (not full original indices)
-    index_sets = stratified_subsets(y_train[train_idx], cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed, num_classes)
+    if cfg.class_split:
+        # Partition classes across experts deterministically
+        classes_per_expert = [[] for _ in range(cfg.num_experts)]
+        for cls in range(num_classes):
+            classes_per_expert[cls % cfg.num_experts].append(cls)
+        index_sets = []
+        for expert_id in range(cfg.num_experts):
+            cls_list = classes_per_expert[expert_id]
+            # get training indices belonging to these classes
+            # idxs are indices into the train split; keep them relative to train_split arrays
+            idxs = np.where(np.isin(y_train[train_idx].squeeze(), cls_list))[0]
+            index_sets.append(idxs)
+    else:
+        index_sets = stratified_subsets(y_train[train_idx], cfg.num_experts, cfg.subset_pool_fraction, cfg.subset_seed, num_classes)
 
     for expert_id, indices in enumerate(index_sets):
         expert_dir = cfg.output_root / f"expert_{expert_id:02d}"

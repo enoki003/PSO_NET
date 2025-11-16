@@ -143,6 +143,8 @@ class FitnessResult:
     redundancy: float
     complexity: float
     smoothness: float
+    diag_mean: float = 0.0
+    
 
 
 class ParticleSwarmOptimizer:
@@ -172,9 +174,11 @@ class ParticleSwarmOptimizer:
         self.iterations = iterations
         self.rng = rng
 
+        # Initialize particle positions and velocities
         self.positions = np.stack(
             [weight_adapter.sample_initial(rng) for _ in range(num_particles)]
         )
+        # duplicate initialization removed — variables already initialized.
         self.velocities = np.zeros_like(self.positions)
         self.personal_best_positions = self.positions.copy()
         self.personal_best_scores = np.full(num_particles, -np.inf)
@@ -271,6 +275,8 @@ class FitnessEvaluator:
         beta: float,
         gamma: float,
         delta: float,
+        gating_temp: float = 1.0,
+        diag_penalty: float = 0.0,
     ) -> None:
         self.weight_adapter = weight_adapter
         self.gating_model = gating_model
@@ -281,6 +287,8 @@ class FitnessEvaluator:
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
+        self.gating_temp = float(gating_temp)
+        self.diag_penalty = float(diag_penalty)
         mask = np.ones((num_experts, num_experts), dtype=np.float32) - np.eye(
             num_experts, dtype=np.float32
         )
@@ -301,6 +309,8 @@ class FitnessEvaluator:
             expert_logits = tf.convert_to_tensor(batch.expert_logits)
 
             gating_logits = self.gating_model(images, training=False)
+            if getattr(self, 'gating_temp', None) and self.gating_temp != 1.0:
+                gating_logits = gating_logits / float(self.gating_temp)
             gating_logits = tf.reshape(
                 gating_logits, (-1, self.num_experts, self.num_experts)
             )
@@ -334,6 +344,14 @@ class FitnessEvaluator:
                 (smooth_batch / max(1, self.recurrent_steps)).numpy()
             )
 
+            # diag_penalty: discourage identity solutions by penalizing mean diag of gating
+            if getattr(self, "diag_penalty", 0.0) and float(self.diag_penalty) > 0.0:
+                # compute mean diagonal for this batch and accumulate
+                diag_mean_batch = float(tf.reduce_mean(tf.linalg.diag_part(gating_matrix)).numpy())
+                if "diag_accum" not in locals():
+                    diag_accum = 0.0
+                diag_accum += diag_mean_batch
+
             total_correct += int(tf.reduce_sum(correct).numpy())
             total_samples += labels.shape[0]
             batch_count += 1
@@ -342,13 +360,19 @@ class FitnessEvaluator:
         redundancy = redundancy_accum / max(1, batch_count)
         complexity = complexity_accum / max(1, batch_count)
         smoothness = smoothness_accum / max(1, batch_count)
+        diag_penalty_val = self.diag_penalty if getattr(self, "diag_penalty", 0.0) else 0.0
+        diag_mean_total = 0.0
+        if diag_penalty_val > 0.0:
+            diag_mean_total = (diag_accum / max(1, batch_count)) if "diag_accum" in locals() else 0.0
+
         score = (
             self.alpha * accuracy
             - self.beta * redundancy
             - self.gamma * complexity
             - self.delta * smoothness
+            - diag_penalty_val * float(diag_mean_total)
         )
-        return FitnessResult(score, accuracy, redundancy, complexity, smoothness)
+        return FitnessResult(score, accuracy, redundancy, complexity, smoothness, diag_mean_total)
 
     def average_gating_matrix(self, vector: np.ndarray) -> np.ndarray:
         """Return the mean gating matrix Cx averaged over the evaluation set.
@@ -363,6 +387,8 @@ class FitnessEvaluator:
         for batch in self.eval_set.iterate():
             images = tf.convert_to_tensor(batch.images)
             gating_logits = self.gating_model(images, training=False)
+            if getattr(self, 'gating_temp', None) and self.gating_temp != 1.0:
+                gating_logits = gating_logits / float(self.gating_temp)
             gating_logits = tf.reshape(
                 gating_logits, (-1, self.num_experts, self.num_experts)
             )
@@ -397,6 +423,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--dataset", choices=["cifar100", "cifar10"], default="cifar100"
     )
     parser.add_argument("--recurrent-steps", type=int, default=config.PSO_RECURRENT_STEPS)
+    parser.add_argument("--fitness-alpha", type=float, default=config.FITNESS_ALPHA)
+    parser.add_argument("--fitness-beta", type=float, default=config.FITNESS_BETA)
+    parser.add_argument("--fitness-gamma", type=float, default=config.FITNESS_GAMMA)
+    parser.add_argument("--fitness-delta", type=float, default=config.FITNESS_DELTA)
+    parser.add_argument("--gating-temp", type=float, default=1.0, help="Softmax temperature for gating logits")
+    parser.add_argument("--diag-penalty", type=float, default=0.0, help="Penalty for diag dominance in gating matrix (higher discourages identity)")
     parser.add_argument("--log-interval", type=int, default=5, help="Print progress every N iterations")
     parser.add_argument("--profile", action="store_true", help="Print per-iteration timing for debug")
     parser.add_argument(
@@ -466,10 +498,12 @@ def main(argv: Iterable[str] | None = None) -> None:
         eval_set=eval_set,
         num_experts=args.num_experts,
         recurrent_steps=max(1, args.recurrent_steps),
-        alpha=config.FITNESS_ALPHA,
-        beta=config.FITNESS_BETA,
-        gamma=config.FITNESS_GAMMA,
-        delta=config.FITNESS_DELTA,
+        alpha=args.fitness_alpha,
+        beta=args.fitness_beta,
+        gamma=args.fitness_gamma,
+        delta=args.fitness_delta,
+        gating_temp=args.gating_temp,
+        diag_penalty=args.diag_penalty,
     )
 
     optimizer = ParticleSwarmOptimizer(
@@ -559,10 +593,12 @@ def main(argv: Iterable[str] | None = None) -> None:
         eval_set=test_eval_set,
         num_experts=args.num_experts,
         recurrent_steps=max(1, args.recurrent_steps),
-        alpha=config.FITNESS_ALPHA,
-        beta=config.FITNESS_BETA,
-        gamma=config.FITNESS_GAMMA,
-        delta=config.FITNESS_DELTA,
+        alpha=args.fitness_alpha,
+        beta=args.fitness_beta,
+        gamma=args.fitness_gamma,
+        delta=args.fitness_delta,
+        gating_temp=args.gating_temp,
+        diag_penalty=args.diag_penalty,
     )
     best_result_test = test_evaluator(best_vector)
 
@@ -613,6 +649,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     "accuracy": best_result_train.accuracy,
                     "redundancy": best_result_train.redundancy,
                     "complexity": best_result_train.complexity,
+                    "diag_mean": float(best_result_train.diag_mean),
                     "smoothness": best_result_train.smoothness,
                     "samples": int(opt_labels.shape[0]),
                 },
@@ -621,10 +658,16 @@ def main(argv: Iterable[str] | None = None) -> None:
                     "accuracy": best_result_test.accuracy,
                     "redundancy": best_result_test.redundancy,
                     "complexity": best_result_test.complexity,
+                    "diag_mean": float(best_result_test.diag_mean),
                     "smoothness": best_result_test.smoothness,
                     "samples": int(y_test.shape[0]),
                 },
                 "optimize_split": args.optimize_split,
+                # Record PSO hyperparameters used for gating so runs are reproducible
+                "gating_temp": float(args.gating_temp),
+                "diag_penalty": float(args.diag_penalty),
+                # diag_mean is the average mean(diag(Cx)) for the test split (helps audit identity bias)
+                "diag_mean": float(best_result_test.diag_mean),
             },
             fp,
             indent=2,
