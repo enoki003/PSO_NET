@@ -1,3 +1,74 @@
+## 7. 最近の変更と短期実験結果（2025-11-16）
+
+### 変更の概要 ✅
+- `program/pso_train.py` に以下の新しい実験用フラグを追加しました：
+	- `--gating-temp`: softmax 温度。大きくすると行ごとの分布がフラットになり混合を促します。
+	- `--diag-penalty`: 行列の対角成分平均に対するペナルティ（恒等ゲーティングを抑制）。
+	- `--fitness-alpha/beta/gamma/delta`: 適応度関数の重みを CLI で上書き可能にしました（冗長性/複雑性/滑らかさの制御）。
+
+- `FitnessEvaluator` の返り値に `diag_mean` を追加して、評価内での対角平均を取得可能にしました。
+
+- 可視化サブパッケージ `program.viz` を追加しました（`program.visualize_gating`,`program.viz.diagnose_gating`,`program.visualize_input_dynamics` のラッパーモジュール）。
+
+- 診断ツール: `program.viz.diagnose_gating`（サンプルごとの対角比率 / 行エントロピー / sparsity を JSON とヒストグラムで出力）。
+
+- `program/inspect_pso_C_history.py` は `C_history.npy` を解析して `C_stats.json` (diag_means, ent_means, spectral radius 等) と PNG を生成します。
+
+- CLI安定性と可搬性向上：`program/viz/cli.py` の引数組立ての書き方を修正（fish などの一部シェルでの SyntaxError を回避）。
+
+- ユーティリティ追加: `program/viz/export_edges.py` — iterationごとの上位kエッジを CSV 出力します。
+### 何が確認できたか（短期実験の結果） 🔬
+- 基本挙動（恒等化）: 既存の PSO run (`configs/results/cifar10_full/pso`) ではゲーティングはほぼ恒等で、`mean_diag_frac ≈ 0.99995`、`mean_row_entropy ≈ 0.0003948` と極端に小さいエントロピーが観測されました。これは多くの初期設定で自然に出る局所解です。
+
+- 温度・ペナルティで混合を誘導: 短期PSOで `--gating-temp 3.0` と `--fitness-beta/gamma/delta=0` を併用した実験（`configs/results/cifar10_full/pso_temp3_beta0`）を行ったところ、
+	- `mean_diag_frac = 0.0887875`（対角の平均が約 8.9%）
+	- `mean_row_entropy = 0.1907628`（行エントロピーが増加）
+	- `inspect_pso_C_history` による `diag_means` は初期 ≈0.05→最終 ≈0.09 の推移を示し、恒等化から混合へ移動したことを示します。
+
+- 入力依存遷移: `program.visualize_input_dynamics` による GIF 録画では、あるサンプルで `deltas`（recurrent ステップ間の mixture ノルム差）が [0.0, 5.57, 5.02, 4.70] など、ステップごとに顕著な変化が観測されました。これはゲーティング行列が各ステップで混合を引き起こしている証拠です。
+
+- 精度とトレードオフ: 恒等状態が最も高精度場合もあり（例: `configs/results/cifar10_full/pso/fitness.json` の accuracy ≈ 0.6948）、`pso_temp3_beta0` の accuracy ≈ 0.5754 と、混合が精度を下げるケースが観測されました（目的関数の重みが重要）。
+
+### 出力されたアーティファクト（参考）
+- `configs/results/.../pso_history.json`（iterationごとの best score と `avg_gating`）
+- `configs/results/.../C_history.npy`（iteration × N × N）と `inspect_pso_C_history` による `C_stats.json`/`C_stats.png`
+- `configs/results/.../viz/*/gating_diag_stats.json`（per-sample diag/entropy stats）
+- `configs/results/.../viz/*/top_edges.csv`（`program.viz.export_edges` が生成）
+- `configs/results/.../viz/*/gating_anim.mp4`, `input_*_dynamics.gif`
+
+### 監査（公正性）に関して
+- デフォルトの `--optimize-split` は `train` です。PSO 実験は train で最適化され、最終評価は `test` で行う設計を保持しています。これにより test leakage は防がれています。
+- ただし `--optimize-split` に `both` または `test` を選ぶとテストセットを最適化に含めてしまうため、実稼働/レポート実験では使用しないでください（README に条件を明記しました）。
+
+### 次の推奨ステップ（研究的）
+1. `--gating-temp` と `--diag-penalty` のグリッド探索：混合と精度の Pareto 曲線を作る（短期間の PSO で）。
+2. `--class-split` を使った専門家訓練：専門家を意図的に差別化すると、混合が精度向上につながりやすいです。 
+3. 評価関数に `entropy` ボーナスを入れるのも有効（`zeta * mean_entropy` を正の項にして混合を積極報酬）。
+
+### プレゼン用可視化の追加ツール（使い方）
+- PSO の反復でネットワーク構造がどう変わるかを直観的に示す `present_graph_evolution` を追加しました。平均ゲーティング行列時系列からネットワーク図（ノード＝専門家、エッジ＝結合の強さ）を生成し、適応度曲線と並べてアニメーション（MP4/GIF）にします。
+
+Usage:
+```bash
+uv run -m program.viz.present_graph_evolution --history configs/results/cifar10_full/pso_temp3_beta0/pso_history.json --out ./viz/pso_temp3_anim.gif --fps 6 --top-k 8
+```
+
+- 変化するエッジの重みを時間軸でプロットするために `export_edges` と `plot_edge_timeseries` を使います。`program.viz.export_edges` は iteration 毎の top-k エッジを CSV 出力、`program.viz.plot_edge_timeseries` でそれを線グラフ化します。
+
+Usage:
+```bash
+uv run -m program.viz.export_edges --history configs/results/cifar10_full/pso_temp3_beta0/pso_history.json --top-k 8 --out ./viz/top_edges.csv
+uv run -m program.viz.plot_edge_timeseries --top_edges_csv ./viz/top_edges.csv --out ./viz/top_edges_timeseries.png
+```
+
+- 個別入力のダイナミクスは `program.visualize_input_dynamics` が出力する GIF をプレゼンに使うとわかりやすいです（画像 + ゲーティング heatmap + class probs を一枚で表示）。例：
+```bash
+uv run -m program.visualize_input_dynamics --experts models/cifar_sub_experts --gating configs/results/cifar10_full/pso_temp3_beta0 --per-class 1 --out ./viz/pso_temp3_inputs
+```
+
+---
+
+※ このセクションは 2025-11-16 の実験と修正を反映しています。
 # PSO駆動型動的結合ネットワーク研究の詳細設計
 
 ## 0. 実装サマリと利用手順
@@ -499,6 +570,27 @@ python -m program.visualize_input_dynamics \
 	--recurrent-steps 3 \
 	--out configs/results/cifar10_full/viz/input_dynamics
 ```
+
+## 10. 可視化サブパッケージ (整理済み) ✅
+
+複数の可視化スクリプトを1つにまとめた `program.viz` サブパッケージを作りました。これにより、可視化タスクを一箇所から呼べるようになっています。
+
+サブコマンド（推奨）:
+- `gating` — PSO のゲーティング行列をアニメ／静的図として出力
+- `metrics` — 学習・評価メトリクスを PNG に出力
+- `auto` — `experiment_summary.json` を読んで実験結果を自動可視化
+- `input` — 入力依存のダイナミクス GIF をまとめて生成
+
+使用例:
+
+```bash
+python -m program.viz.cli gating --history configs/results/cifar10_full/pso/pso_history.json --out ./viz/gating.gif
+python -m program.viz.cli metrics --input configs/results/cifar10_full/single_cnn --output ./viz
+python -m program.viz.cli auto --summary configs/results/cifar10_full/experiment_summary.json
+python -m program.viz.cli input --experts models/cifar_sub_experts --gating configs/results/cifar10_full/pso --per-class 1
+```
+
+これまでの `program.visualize_*` スクリプトはそのまま動きますが、CLI 経験を簡潔にするため `program.viz.cli` を推奨します。
 
 このスクリプトは、指定したテスト画像（`--sample-ids` または `--per-class`）に対して、最終ゲーティング行列で recurrent steps に沿った混合手順の変化を GIF で書き出します。出力例：`input_<idx>_dynamics.gif`。
 
