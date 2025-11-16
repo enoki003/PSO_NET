@@ -27,6 +27,14 @@ uv run train-sub-nn
 - Python バージョンは TensorFlow の互換性上、`>=3.10,<3.13` を使用します。本リポジトリでは `.python-version` を `3.12` に固定しています。uv のメッセージに従って `uv python pin 3.12` を実行しても同等です。
 - コマンドは必ずリポジトリのルートで実行してください（`program/` 直下からファイル実行すると相対インポートが失敗します）。
 
+### 0.3 実験サマリーの追記（マージ）
+
+`program/run_experiment.py` は、出力先に既存の `experiment_summary.json` がある場合でも、最新の実行で「完了 (completed)」したステージのみを既存サマリーに追記（マージ）します。
+
+- 既存の結果は維持され、今回スキップされたステージで上書きされません。
+- 専門家学習をスキップして PSO やベースラインだけ追加実行しても、同じディレクトリ配下のサマリーに追記されます。
+- サマリーの場所は設定ファイルの `[experiment].results_dir` 直下です。
+
 ## 1. 背景と動機
 
 ### 1.1 静的な深層学習の課題
@@ -137,7 +145,7 @@ F(\theta) = \alpha \cdot \text{Acc} - \beta \cdot \text{Redundancy} - \gamma \cd
 
 1. 環境準備
 	- Python 仮想環境作成・有効化。
-	- 依存をインストール: `pip install -e .`。
+	- 依存をインストール: `pip install -e .`。ビジュアライゼーションには追加で `networkx`, `imageio`, `pillow`, `scipy` が必要です。
 	- GPU 利用確認 (`tensorflow` が GPU を認識するか `tf.config.list_physical_devices('GPU')`)。
 
 2. 専門家事前学習 (Sub-Experts)
@@ -370,32 +378,32 @@ uv run aggregate-results ./results/single ./results/ensemble ./results/moe ./res
 - lbest PSO トポロジ実装と比較
 - 温度付きゲート (Softmax 温度調整) による sparsity 制御
 
-## 9. 実験結果（CIFAR-10: cifar10_fair_comparison）
+## 9. 実験結果（CIFAR-10: cifar10_full）
 
-実験サマリは `configs/results/cifar10_fair/experiment_summary.json` に保存されています（自動生成）。このランでは PSO ステージはスキップされ、各ベースラインと単一 CNN を比較しました。
+実験サマリは `configs/results/cifar10_full/experiment_summary.json` に保存されています（自動生成）。以下は該当サマリーからの抜粋です。
 
 ### 9.1 指標（抜粋）
 
 | 手法 | 指標 | 値 | 備考 |
 |---|---|---:|---|
-|  | Test Top-5 | 0.9971 |  |
-|  | Val Top-1 | 0.9038 |  |
-| Avg Ensemble | Top-1 | 0.6799 | 4096 サンプル評価 |
-|  | Top-5 | 0.9768 |  |
-| PSO | Test Top-1 | 0.6948 | 4096 サンプル |
-| Random Gate | Top-1 (mean±std) | 0.6628 ± 0.0021 | 4096 サンプル, 10 試行 |
-| Grad-MoE | Top-1 | 0.6855 | 4096 サンプル |
-|  | Top-5 | 0.9761 |  |
-| Stacking | Top-1 | 0.7202 |  |
-|  | Top-5 | 0.9808 |  |
+| Single CNN | Test Top-1 | 0.8960 | summary の test_metrics.acc |
+|  | Test Top-5 | 0.9974 | summary の test_metrics.top5 |
+| Avg Ensemble | Top-1 | 0.6804 | 10000 サンプル評価 |
+|  | Top-5 | 0.9745 |  |
+| Random Gate | Top-1 (mean±std) | 0.6626 ± 0.0049 | 4096 サンプル, 10 試行 |
+| Grad-MoE | Top-1 | 0.6944 |  |
+|  | Top-5 | 0.9750 |  |
+| Stacking | Top-1 | 0.7266 |  |
+|  | Top-5 | 0.9812 |  |
+| PSO (提案) | Top-1 | 0.6948 | fitness.json の accuracy |
 
 出典パス（実ディレクトリ）:
 
-- Single CNN: `configs/results/cifar10_fair/single_cnn/metrics.json`
-- Ensemble: `configs/results/cifar10_fair/ensemble/metrics.json`
-- Random Gate: `configs/results/cifar10_fair/random_gate/metrics.json`
-- MoE: `configs/results/cifar10_fair/moe/test_metrics.json`
-- Stacking: `configs/results/cifar10_fair/stacking/test_metrics.json`
+- Single CNN: `configs/results/cifar10_full/single_cnn/metrics.json`
+- Ensemble: `configs/results/cifar10_full/ensemble/metrics.json`
+- Random Gate: `configs/results/cifar10_full/random_gate/metrics.json`
+- MoE: `configs/results/cifar10_full/moe/test_metrics.json`
+- Stacking: `configs/results/cifar10_full/stacking/test_metrics.json`
 
 
 ### 9.2 所見と解釈
@@ -407,26 +415,26 @@ uv run aggregate-results ./results/single ./results/ensemble ./results/moe ./res
 学習曲線（Single CNN）:
 
 ```
-uv run viz-metrics --input configs/results/cifar10_fair/single_cnn --output configs/results/cifar10_fair/viz
+uv run viz-metrics --input configs/results/cifar10_full/single_cnn --output configs/results/cifar10_full/viz
 ```
 
 ベースライン比較の棒グラフ（Top-1/Top-5）:
 
 ```
 uv run aggregate-results \
-	configs/results/cifar10_fair/ensemble \
-	configs/results/cifar10_fair/random_gate \
-	configs/results/cifar10_fair/moe \
-	configs/results/cifar10_fair/stacking \
-	--output configs/results/cifar10_fair/baselines.json
+	configs/results/cifar10_full/ensemble \
+	configs/results/cifar10_full/random_gate \
+	configs/results/cifar10_full/moe \
+	configs/results/cifar10_full/stacking \
+	--output configs/results/cifar10_full/baselines.json
 
-uv run viz-metrics --input configs/results/cifar10_fair/baselines.json --output configs/results/cifar10_fair/viz
+uv run viz-metrics --input configs/results/cifar10_full/baselines.json --output configs/results/cifar10_full/viz
 ```
 
 （PSO を実行済みであれば）ゲーティング可視化:
 
 ```
-uv run viz-gating --history configs/results/cifar10_fair/pso/pso_history.json --static --static-dir configs/results/cifar10_fair/viz --graph
+uv run viz-gating --history configs/results/cifar10_full/pso/pso_history.json --static --static-dir configs/results/cifar10_full/viz --graph
 ```
 
 ### 9.4 追試の推奨（PSO-DCN 実行）
@@ -448,8 +456,50 @@ uv run pso-train \
 	--recurrent-steps 1 \
 	--hidden-units 128 \
 	--batch-size 128 \
-	--output configs/results/cifar10_fair/pso_quick \
+	--output configs/results/cifar10_full/pso_quick \
 	--log-interval 2 --profile
 ```
 
 実行後は上記の可視化コマンドで `gating_fitness.png` と `gating_graph.png` を確認してください。
+
+### 9.5 自動可視化ユーティリティ
+
+`program/auto_visualize.py` は `configs/.../experiment_summary.json` を読み、該当するステージの可視化を自動で生成します。複数の実験段階を手動で実行する手間が省けます。
+
+例: `configs/results/cifar10_full/experiment_summary.json` を使って可視化を生成する
+
+```bash
+python -m program.auto_visualize --summary configs/results/cifar10_full/experiment_summary.json --out configs/results/cifar10_full/viz
+# Short call to also generate per-input dynamics for a sample per class (may be slow on CPU)
+python -m program.auto_visualize --summary configs/results/cifar10_full/experiment_summary.json --out configs/results/cifar10_full/viz --input-dynamics
+```
+
+オプション:
+- `--psograph`: PSO の最終平均結合行列からグラフスナップショットを生成
+- `--threshold`: グラフ描画でのエッジしきい値（デフォルト 0.01）
+- `--show`: ダウンロード／ヘッドレス環境以外で表示したい場合
+
+生成される出力例:
+- `configs/results/cifar10_full/viz/single_cnn/loss_curves.png` — Single CNN の学習曲線
+- `configs/results/cifar10_full/viz/baselines.json` — 各ベースラインの集計（棒グラフ作成に使用）
+- `configs/results/cifar10_full/viz/pso/gating_fitness.png` — PSO のフィットネス曲線と最終行列のヒートマップ
+- `configs/results/cifar10_full/viz/pso/gating_graph.png` — (オプション) 最終ゲーティングネットワーク図
+
+### 9.6 入力依存ダイナミクスの可視化
+
+個々の入力画像に対して「最終ゲーティングがどのように専門家出力を混合するか」をアニメーションで示すスクリプトを追加しました。
+
+```bash
+python -m program.visualize_input_dynamics \
+	--experts configs/models/cifar10_experts \
+	--gating configs/results/cifar10_full/pso \
+	--dataset cifar10 \
+	--num-experts 8 \
+	--per-class 1 \
+	--recurrent-steps 3 \
+	--out configs/results/cifar10_full/viz/input_dynamics
+```
+
+このスクリプトは、指定したテスト画像（`--sample-ids` または `--per-class`）に対して、最終ゲーティング行列で recurrent steps に沿った混合手順の変化を GIF で書き出します。出力例：`input_<idx>_dynamics.gif`。
+
+依存: `imageio` がインストールされていることを確認してください。
