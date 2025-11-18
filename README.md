@@ -45,6 +45,54 @@
 2. `--class-split` を使った専門家訓練：専門家を意図的に差別化すると、混合が精度向上につながりやすいです。 
 3. 評価関数に `entropy` ボーナスを入れるのも有効（`zeta * mean_entropy` を正の項にして混合を積極報酬）。
 
+### 7.1 恒等的ゲーティングへの対処 — 新たな仮説（diag-penalty）と短期実験
+
+背景: 既存の PSO run は平均的に恒等に近いゲーティング（自己活性化）に収束しやすく、平均対角比率や行エントロピーからほぼ恒等に見えます。これは解釈性や学習上簡便ですが、入力依存の混合を得るという本研究の意図と矛盾します。
+
+仮説: ゲーティング行列の対角（自己結合）平均に小さなペナルティを課すことで、PSO が恒等解に落ちることを抑制し、入力依存混合を促せるはずである。
+
+実験設定（短期, 再現コマンド）:
+- ベースライン PSO: `configs/results/cifar10_full/pso`（iterations 200, particles 32）
+- 温度で混合を促す設定: `pso_temp3_beta0`（--gating-temp 3.0, 実験では fitness-beta/gamma/delta=0 を併用）
+- 新規ペナルティ導入: `pso_diag_0_2`（--diag-penalty 0.2）
+
+短期 PSO の最小再現コマンド例（CPU向け短縮）:
+```bash
+uv run -m program.pso_train \
+	--experts configs/models/cifar10_experts \
+	--num-experts 8 \
+	--sample-count 2048 \
+	--batch-size 128 \
+	--hidden-units 256 \
+	--seed 123 \
+	--output configs/results/cifar10_full/pso_diag_0_2 \
+	--iterations 40 --particles 16 --dataset cifar10 --recurrent-steps 2 \
+	--gating-temp 1.0 --diag-penalty 0.2
+```
+
+主要観察: 短期実験で得られた代表値（`configs/results/cifar10_full`）:
+- Baseline `pso`: accuracy ≈ 0.6948, avg active per row ≈ 2.74
+- `pso_temp3_beta0`: accuracy ≈ 0.5754, mean_diag_frac ≈ 0.0888, avg active per row ≈ 5.96
+- `pso_diag_0_2`: accuracy ≈ 0.5821, diag_mean (fitness.json) ≈ 0.2623, mean_diag_frac (diag stats) ≈ 0.3986, avg active per row ≈ 7.9969
+
+解釈と注意:
+- `diag_penalty` は恒等解を抑制するが、短期実験では accuracy を下げる傾向が見られた。これは適用する罰則の大きさや目的関数の他の重みとのトレードオフが原因と考えられる。
+- 混合が増えると平均の "アクティブ専門家数" が増え、推論時の計算コストも上がる。今回の計測では行ごとの平均アクティブ数は 2.74 → 5.96 → 7.99 と増加している。
+- したがって、混合を無条件に増やすのではなく、精度と計算コストの折衷点（Pareto）を探ることが重要です。
+
+実験で用いたメトリクス・可視化:
+- `fitness.json` （accuracy, diag_mean, gating_temp, diag_penalty）
+- `inspect_pso_C_history` による `C_stats.json`（diag_means, ent_means）と PNG
+- `program.viz.diagnose_gating` による `gating_diag_stats.json`（per-sample diag_frac、row_entropy）とヒストグラム
+- `program.viz.estimate_compute` による平均アクティブ専門家数
+
+推奨される次のステップ:
+1. `--gating-temp` と `--diag-penalty` の小規模グリッドを走らせ、精度と diag_mean（/計算コスト）をプロットして Pareto フロントを作る。
+2. `top-k` や Hard routing（Top-1）をベースとした `--top-k` オプションで混合領域の計算効率を確保したまま精度低下を抑えられるか試す。
+3. `diag_penalty` は L1（疎）ペナルティや entropy ベースの報酬化と組み合わせ、単に対角を下げるだけでなく入力依存の分配を奨励する設計を検討する。
+
+上記調査に必要なコマンドは `program/viz/compare_experiments.py` と `program/viz/plot_comparison.py` により自動集計と可視化が可能です（`viz/compare/` 配下に CSV/PNGを出力）。
+
 ### プレゼン用可視化の追加ツール（使い方）
 - PSO の反復でネットワーク構造がどう変わるかを直観的に示す `present_graph_evolution` を追加しました。平均ゲーティング行列時系列からネットワーク図（ノード＝専門家、エッジ＝結合の強さ）を生成し、適応度曲線と並べてアニメーション（MP4/GIF）にします。
 
