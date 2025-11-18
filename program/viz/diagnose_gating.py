@@ -28,6 +28,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--gating", type=Path, required=True, help="Path to PSO output dir containing gating_weights.npy")
     p.add_argument("--dataset", choices=["cifar10", "cifar100"], default="cifar10")
     p.add_argument("--num-experts", type=int, default=8)
+    p.add_argument("--hidden-units", type=int, default=384, help="Hidden units for gating model - must match PSO run")
     p.add_argument("--sample-count", type=int, default=0, help="0 means use full test set")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--out", type=Path, default=Path("./results/viz/pso_diag"))
@@ -66,7 +67,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     samples_norm = normalize_images(x_test, mean, std)
 
     # gating model
-    gating_model = build_gating_model(num_experts=args.num_experts, hidden_units=384)
+    gating_model = build_gating_model(num_experts=args.num_experts, hidden_units=args.hidden_units)
     weights_path = args.gating / "gating_weights.npy"
     if not weights_path.exists():
         raise SystemExit(f"gating_weights.npy not found at {weights_path}")

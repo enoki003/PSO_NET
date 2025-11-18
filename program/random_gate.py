@@ -18,7 +18,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Random gating baseline evaluation")
     parser.add_argument("--experts", type=Path, default=Path("./models/cifar_sub_experts"))
     parser.add_argument("--num-experts", type=int, default=8)
-    parser.add_argument("--dataset", choices=["cifar100", "cifar10"], default="cifar100")
+    parser.add_argument("--dataset", choices=["cifar100", "cifar10", "composite_mnist"], default="cifar100")
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--sample-count", type=int, default=0, help="Optional random subset size")
@@ -36,6 +36,15 @@ def load_dataset(name: str) -> tuple[np.ndarray, np.ndarray, tuple[int, int, int
         (_, _), (images, labels) = cifar10.load_data()
         mean, std = config.CIFAR10_CHANNEL_MEAN, config.CIFAR10_CHANNEL_STD
         num_classes = config.CIFAR10_NUM_CLASSES
+    if name == "composite_mnist":
+        from .data_utils import build_composite_mnist
+
+        x_train, y_train, x_test, y_test = build_composite_mnist(seed=0)
+        images = x_test
+        labels = y_test
+        # images are float32 in 0..1 from generator; normalize to same scale as others
+        images = normalize_images((images * 255.0).astype(np.uint8), (0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        num_classes = 100
     images = normalize_images(images, mean, std)
     labels = labels.squeeze().astype(np.int32)
     return images, labels, mean, num_classes

@@ -14,6 +14,7 @@ from typing import List, Tuple
 import numpy as np
 import tensorflow as tf
 from keras.datasets import cifar10
+from keras.datasets import mnist
 
 from . import config
 
@@ -112,3 +113,69 @@ def build_tf_dataset(
     ds = ds.map(lambda x, y: (_normalize(tf.cast(x, tf.float32)), y), num_parallel_calls=AUTOTUNE)
     ds = ds.batch(batch_size).prefetch(AUTOTUNE)
     return ds
+
+
+def build_composite_mnist(
+    *,
+    seed: int = 42,
+    num_permutations: int = 1,
+    img_shape: tuple[int, int, int] = (32, 32, 3),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Create a simple Multi-MNIST composite dataset.
+
+    - Each sample is constructed by placing two MNIST digits on a 32x32 RGB canvas
+      (digits are centered in random subwindows). Labels are mapped to 10*digit1 + digit2
+      so we obtain 100 classes compatible with a CIFAR-100 style head.
+    - num_permutations can be used to duplicate the dataset with different random offsets.
+    """
+    rng = np.random.default_rng(seed)
+
+    (x_train_full, y_train_full), (x_test, y_test) = mnist.load_data()
+    # Convert to float32 0..1 and expand to 3 channels
+    def _prep(xs):
+        xs = xs.astype("float32") / 255.0
+        # upcast to 3 channels and resize to 32x32 by simple padding
+        xs = np.stack([xs, xs, xs], axis=-1)
+        # pad 28x28 -> 32x32 symmetric
+        pad_width = ((2, 2), (2, 2), (0, 0))
+        xs = np.pad(xs, ((0, 0),) + pad_width, mode="constant")
+        return xs
+
+    x_train = _prep(x_train_full)
+    x_test = _prep(x_test)
+
+    def _make_pairs(images, labels):
+        n = images.shape[0]
+        pairs = []
+        pair_labels = []
+        for i in range(n):
+            j = rng.integers(0, n)
+            img = images[i].copy()
+            img2 = images[j]
+            # Place second digit at a random offset inside 32x32 (small jitter)
+            dx = rng.integers(-3, 4)
+            dy = rng.integers(-3, 4)
+            # paste by averaging the two overlapping regions to avoid clipping
+            h, w = 32, 32
+            # For simplicity just blend via alpha 0.5
+            img = 0.5 * img + 0.5 * np.roll(np.roll(img2, dx, axis=0), dy, axis=1)
+            pairs.append(img.astype(np.float32))
+            lbl = int(labels[i]) * 10 + int(labels[j])
+            pair_labels.append(lbl)
+        return np.stack(pairs, axis=0), np.asarray(pair_labels, dtype=np.int32)
+
+    # Optionally duplicate with multiple random offsets to augment
+    xtr, ytr = _make_pairs(x_train, y_train_full)
+    xts, yts = _make_pairs(x_test, y_test)
+
+    if num_permutations > 1:
+        all_xtr = [xtr]
+        all_ytr = [ytr]
+        for _ in range(num_permutations - 1):
+            xt, yt = _make_pairs(x_train, y_train_full)
+            all_xtr.append(xt)
+            all_ytr.append(yt)
+        xtr = np.concatenate(all_xtr, axis=0)
+        ytr = np.concatenate(all_ytr, axis=0)
+
+    return xtr, ytr, xts, yts
